@@ -1,0 +1,20 @@
+node_modules/
+bun.lockb
+*.log
+
+# Backup output — never commit backup data or manifests
+wm-backup/
+*-backup/
+blobs/
+manifest.db
+manifest.db-wal
+manifest.db-shm
+
+# R2 credentials live in ~/.winmigrate/r2.json, but guard against a stray copy
+r2.json
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.pfx
