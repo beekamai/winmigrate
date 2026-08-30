@@ -105,6 +105,24 @@ Raw directory size is a terrible guide to what is worth keeping:
   review. A media filter without a `minFileSize` floor also sweeps up favicons
   and sprite sheets.
 
+## Two failures worth remembering
+
+**A running app can hang the backup with no symptom.** With Chrome open, packing
+stalled on its extension files: zero CPU, zero I/O, no error, progress frozen at
+320800/320809. Closing Chrome let it finish immediately. Hence `src/apps.ts`
+(warn before starting) and the 90-second abortable read in `pack.ts` (a locked
+file costs a delay, not the run).
+
+**A narrow secret rule is defeated by a broader plain rule over the same tree.**
+`~/.claude.json` was encrypted, but `~/.claude/backups/.claude.json.backup.*` —
+rotated copies with the same live API keys — were collected in plaintext by the
+directory rule. `test/secrets.test.ts` now asserts that no sensitive path is
+reachable by a non-secret rule. When tightening such a rule, existing backups
+keep the old plaintext copy: run `prune` to delete the stale entry and its blob.
+
+Exclude patterns support `^name` to anchor at the rule root, so excluding a
+top-level config does not also exclude same-named files nested deeper.
+
 ## Gotchas
 
 - `bytes += await f()` is a race: the left operand is read before the await

@@ -5,6 +5,7 @@
 */
 
 import { createReadStream, createWriteStream, mkdirSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { createHash } from "node:crypto";
@@ -15,6 +16,13 @@ import { normalizeSep, toPortable, type MachineProfile } from "./portable.ts";
 
 /** Above this size we never buffer the whole file. */
 const STREAM_THRESHOLD = 128 * 1024 * 1024;
+
+/**
+ * A file held by a running application can block a read forever — Chrome's
+ * extension files froze a whole backup with no CPU and no I/O. Every read is
+ * therefore abortable, so one locked file costs a delay, not the run.
+ */
+const FILE_TIMEOUT_MS = 90_000;
 
 export interface PackOptions {
   concurrency: number;
@@ -27,7 +35,8 @@ export interface PackOptions {
 
 async function hashStream(path: string): Promise<string> {
   const h = createHash("sha256");
-  await pipeline(createReadStream(path), async function* (src) {
+  const signal = AbortSignal.timeout(FILE_TIMEOUT_MS);
+  await pipeline(createReadStream(path, { signal }), async function* (src) {
     for await (const chunk of src) h.update(chunk as Buffer);
     yield Buffer.alloc(0);
   });
@@ -37,8 +46,9 @@ async function hashStream(path: string): Promise<string> {
 async function copyStream(from: string, to: string): Promise<number> {
   mkdirSync(dirname(to), { recursive: true });
   let bytes = 0;
+  const signal = AbortSignal.timeout(FILE_TIMEOUT_MS);
   await pipeline(
-    createReadStream(from),
+    createReadStream(from, { signal }),
     async function* (src) {
       for await (const c of src) {
         bytes += (c as Buffer).length;
@@ -48,6 +58,11 @@ async function copyStream(from: string, to: string): Promise<number> {
     createWriteStream(to),
   );
   return bytes;
+}
+
+/** Reads a whole file, but never waits on a lock forever. */
+async function readAll(path: string): Promise<Buffer> {
+  return await readFile(path, { signal: AbortSignal.timeout(FILE_TIMEOUT_MS) });
 }
 
 async function packOne(
@@ -81,7 +96,7 @@ async function packOne(
   if (streaming) {
     hash = await hashStream(f.abs);
   } else {
-    const buf = Buffer.from(await Bun.file(f.abs).arrayBuffer());
+    const buf = await readAll(f.abs);
     hash = createHash("sha256").update(buf).digest("hex");
     payload = buf;
   }
@@ -185,7 +200,14 @@ export async function packAll(
         const n = await packOne(f, mf, machine, opts);
         bytes += n;
       } catch (e) {
-        errors.push(`${f.abs}: ${(e as Error).message}`);
+        const err = e as Error;
+        const locked = err.name === "AbortError" || err.name === "TimeoutError"
+          || /aborted|EBUSY|EPERM|being used by another process/i.test(err.message);
+        errors.push(
+          locked
+            ? `${f.abs}: файл заблокирован приложением — пропущен`
+            : `${f.abs}: ${err.message}`,
+        );
       }
       done++;
       if (done % 200 === 0) opts.onProgress?.(done, files.length, bytes);

@@ -111,6 +111,10 @@ export const PROFILES: Profile[] = [
           "cache", "shell-snapshots", "paste-cache", "telemetry", "debug",
           "daemon", "session-env", "statsig", ".credentials.json",
           ".xai-credentials.json", "sh.exe.stackdump",
+          // Rotated copies of .claude.json carrying the same live API keys.
+          // Without this they would be collected here in plaintext, defeating
+          // the encryption applied to the original below.
+          "backups", "^.mcp.json",
         ],
         rewrite: "text-paths",
       },
@@ -118,6 +122,7 @@ export const PROFILES: Profile[] = [
       // well as path-rewritten. Order on restore is decrypt -> unzstd -> rewrite.
       { path: `${HOME}\\.claude.json`, rewrite: "json-paths", secret: true },
       { path: `${HOME}\\.claude\\.mcp.json`, rewrite: "json-paths", secret: true },
+      { path: `${HOME}\\.claude\\backups`, rewrite: "json-paths", secret: true },
       { path: `${HOME}\\.serena`, exclude: ["cache", "logs"], rewrite: "text-paths" },
     ],
   },

@@ -7,6 +7,7 @@
 
 import { Manifest } from "./manifest.ts";
 import { acquire } from "./lock.ts";
+import { prune } from "./prune.ts";
 import { detectMachine, parseRelocation, toPortable, type Relocation, type VolumeMap } from "./portable.ts";
 import { PROFILES, allProfileNames, profileByName } from "./profiles.ts";
 import { humanBytes, scanProfile, type ScannedFile } from "./scan.ts";
@@ -14,6 +15,7 @@ import { packAll } from "./pack.ts";
 import { restore, verify } from "./restore.ts";
 import { buildProjectMap } from "./rewrite.ts";
 import { discover, inspect, saveProject } from "./gitsave.ts";
+import { detectRunning } from "./apps.ts";
 
 interface Args {
   cmd: string;
@@ -114,6 +116,13 @@ async function cmdPlan(a: Args): Promise<void> {
 async function cmdBackup(a: Args): Promise<void> {
   const machine = await detectMachine();
   const profiles = selectedProfiles(a.profiles);
+
+  const running = await detectRunning(profiles.map((p) => p.name));
+  if (running.length) {
+    console.log("ВНИМАНИЕ: запущены приложения, держащие свои файлы:");
+    for (const a of running) console.log(`  - ${a.label} (${a.count}): ${a.reason}`);
+    console.log("Закрой их для полного бэкапа, либо продолжай — заблокированные файлы будут пропущены.\n");
+  }
 
   const needsPass = profiles.some((p) => p.rules.some((r) => r.secret));
   if (needsPass && !a.pass && !a.dryRun) {
@@ -231,6 +240,27 @@ async function cmdRestore(a: Args): Promise<void> {
   mf.close();
 }
 
+async function cmdPrune(a: Args): Promise<void> {
+  const machine = await detectMachine();
+  const release = acquire(a.out);
+  const mf = new Manifest(a.out);
+  const apply = !a.dryRun;
+
+  console.log(`Сверяю ${a.out} с текущими правилами...\n`);
+  const r = prune(mf, machine, apply);
+
+  const plaintextSecrets = r.staleEntries.filter((s) => !s.encrypted);
+  console.log(`устаревших записей: ${r.staleEntries.length}`);
+  console.log(`осиротевших блобов: ${r.orphanBlobs.length} · освобождается ${humanBytes(r.freed)}`);
+  if (plaintextSecrets.length) {
+    console.log(`\nиз них незашифрованных (первые 10):`);
+    for (const s of plaintextSecrets.slice(0, 10)) console.log(`  ${s.portable}`);
+  }
+  console.log(apply ? "\nУдалено." : "\nНичего не удалено (--dry-run). Убери -n, чтобы применить.");
+  mf.close();
+  release();
+}
+
 async function cmdVerify(a: Args): Promise<void> {
   const mf = new Manifest(a.out);
   const r = await verify(mf);
@@ -305,6 +335,8 @@ Commands:
   backup     Collect, dedupe, compress into a backup directory
   restore    Materialise a backup onto this machine, remapping paths
   verify     Check that every blob referenced by the manifest exists
+  prune      Drop entries the current rules no longer select, and dead blobs
+             (use -n first to preview; needed after tightening a secret rule)
   list       Show contents of an existing backup
   gitsave    Push local-only projects to private GitHub repos (plans by default)
 
@@ -364,6 +396,7 @@ try {
     case "backup": await cmdBackup(a); break;
     case "restore": await cmdRestore(a); break;
     case "verify": await cmdVerify(a); break;
+    case "prune": await cmdPrune(a); break;
     case "list": await cmdList(a); break;
     case "gitsave": await cmdGitsave(a); break;
     case "help": case "--help": case "-h": usage(); break;

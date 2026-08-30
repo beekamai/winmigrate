@@ -14,6 +14,7 @@ import { packAll } from "./pack.ts";
 import { restore, verify } from "./restore.ts";
 import { buildProjectMap } from "./rewrite.ts";
 import { discover, inspect, saveProject } from "./gitsave.ts";
+import { detectRunning } from "./apps.ts";
 import * as r2 from "./r2.ts";
 import {
   Progress, c, confirm, humanBytes, line, menu, multiSelect, pause, prompt, rule, title,
@@ -80,9 +81,51 @@ async function screenOverview(st: State): Promise<void> {
   await pause();
 }
 
+/**
+ * Blocks on applications that hold their data locked. Chrome once froze an
+ * entire backup on its extension files, so this check runs before any work.
+ */
+async function checkRunningApps(profiles: string[]): Promise<boolean> {
+  for (;;) {
+    title("Проверка запущенных приложений", "они держат свои файлы и мешают копированию");
+    line(`  ${c.grey}проверяю…${c.reset}`);
+    const running = await detectRunning(profiles);
+
+    if (!running.length) {
+      title("Проверка запущенных приложений");
+      line(`  ${c.green}✓ мешающих приложений не запущено${c.reset}`);
+      await new Promise((r) => setTimeout(r, 700));
+      return true;
+    }
+
+    title("Закрой эти приложения", "иначе их файлы скопируются частично или бэкап зависнет");
+    for (const a of running) {
+      line(`  ${c.yellow}●${c.reset} ${c.bold}${a.label}${c.reset} ${c.grey}(${a.count} проц.)${c.reset}`);
+      line(`      ${c.grey}${a.reason}${c.reset}`);
+      line(`      ${c.grey}профили: ${a.profiles.join(", ")}${c.reset}`);
+    }
+    line();
+
+    const what = await menu(
+      [
+        { label: "Проверить снова", hint: "закрой приложения и нажми Enter", value: "again" },
+        { label: "Продолжить всё равно", hint: "риск: неполные данные, возможны пропуски", value: "go" },
+        { label: "Отмена", value: "cancel" },
+      ],
+      "Закрой эти приложения",
+      running.map((a) => a.label).join(" · "),
+    );
+    if (what === "again" || what === null) continue;
+    if (what === "cancel") return false;
+    return true;
+  }
+}
+
 async function screenBackup(st: State): Promise<void> {
   const chosen = await multiSelect(profileItems(), "Бэкап", "выбери профили (media отключён по умолчанию — он самый тяжёлый)");
   if (!chosen?.length) return;
+
+  if (!(await checkRunningApps(chosen))) return;
 
   const dir = await prompt("Куда сохранить:", { def: st.backupDir });
   if (dir === null) return;
@@ -135,9 +178,16 @@ async function screenBackup(st: State): Promise<void> {
       `(сэкономлено ${humanBytes(Math.max(0, res.bytes - store.stored))})`,
     );
   }
-  if (res.errors.length) {
-    line(`  ${c.yellow}!${c.reset} ошибок: ${res.errors.length} (первые 3):`);
-    for (const e of res.errors.slice(0, 3)) line(`    ${c.grey}${e}${c.reset}`);
+  const locked = res.errors.filter((e) => e.includes("заблокирован приложением"));
+  const other = res.errors.filter((e) => !e.includes("заблокирован приложением"));
+  if (locked.length) {
+    line(`  ${c.yellow}!${c.reset} пропущено из-за блокировки приложением: ${locked.length}`);
+    line(`  ${c.grey}закрой приложение и запусти бэкап снова — доберёт только их${c.reset}`);
+    for (const e of locked.slice(0, 3)) line(`    ${c.grey}${e.split(":")[0]}${c.reset}`);
+  }
+  if (other.length) {
+    line(`  ${c.yellow}!${c.reset} прочих ошибок: ${other.length} (первые 3):`);
+    for (const e of other.slice(0, 3)) line(`    ${c.grey}${e}${c.reset}`);
   }
   mf.close();
   release();

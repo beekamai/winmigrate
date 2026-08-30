@@ -39,6 +39,12 @@ function excluded(rel: string, extra: string[]): boolean {
   const segs = segments(rel);
   const relFwd = rel.replace(/\\/g, "/");
   for (const pat of [...GLOBAL_EXCLUDES, ...extra]) {
+    // "^name" anchors to the rule root, so excluding a top-level config does
+    // not also exclude same-named files nested deeper.
+    if (pat.startsWith("^")) {
+      if (relFwd.toLowerCase() === pat.slice(1).toLowerCase()) return true;
+      continue;
+    }
     if (pat.includes("/")) {
       if (relFwd.includes(pat)) return true;
       continue;
