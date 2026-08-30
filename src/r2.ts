@@ -6,7 +6,8 @@
 */
 
 import { Database } from "bun:sqlite";
-import { existsSync, mkdirSync, readdirSync, statSync } from "node:fs";
+import { createWriteStream, existsSync, mkdirSync, readdirSync, statSync } from "node:fs";
+import { pipeline } from "node:stream/promises";
 import { dirname, join } from "node:path";
 
 export interface R2Config {
@@ -143,19 +144,55 @@ async function backupFiles(
   return out;
 }
 
-async function pool<T>(
+/** Files above this are streamed in parts instead of being held in memory. */
+const STREAM_ABOVE = 32 * 1024 * 1024;
+/** Upper bound on bytes held in memory across all in-flight transfers. */
+const MEMORY_BUDGET = 256 * 1024 * 1024;
+
+/**
+ * Worker pool bounded by BOTH file count and total in-flight bytes.
+ *
+ * Counting files alone is not enough: this backup contains a 4 GB blob, and 32
+ * parallel slots filled with large objects pushed the process past 13 GB RSS.
+ */
+export async function pool<T>(
   items: T[],
   limit: number,
+  sizeOf: (t: T) => number,
   fn: (t: T) => Promise<void>,
   signal?: AbortSignal,
 ): Promise<void> {
   let i = 0;
+  let inFlight = 0;
+  const waiters: (() => void)[] = [];
+
+  const release = (n: number) => {
+    inFlight -= n;
+    while (waiters.length && inFlight < MEMORY_BUDGET) waiters.shift()!();
+  };
+
+  const acquire = async (n: number) => {
+    // A single object larger than the budget still has to run, alone.
+    while (inFlight > 0 && inFlight + n > MEMORY_BUDGET) {
+      await new Promise<void>((r) => waiters.push(r));
+    }
+    inFlight += n;
+  };
+
   const worker = async () => {
     for (;;) {
       if (signal?.aborted) return;
       const idx = i++;
       if (idx >= items.length) return;
-      await fn(items[idx]!);
+      const item = items[idx]!;
+      // Streamed transfers only hold a chunk at a time, so they book little.
+      const cost = Math.min(sizeOf(item), STREAM_ABOVE);
+      await acquire(cost);
+      try {
+        await fn(item);
+      } finally {
+        release(cost);
+      }
     }
   };
   await Promise.all(Array.from({ length: Math.max(1, limit) }, worker));
@@ -191,10 +228,18 @@ export async function upload(
 
   // Blobs average a few hundred KB, so throughput is bound by per-request
   // latency rather than bandwidth: more parallel requests, not bigger ones.
-  await pool(pending, opts.concurrency ?? 32, async (f) => {
+  await pool(pending, opts.concurrency ?? 32, (f) => f.size, async (f) => {
     if (opts.signal?.aborted) { aborted = true; return; }
     try {
-      await client.file(`${c.prefix}/${f.rel}`).write(Bun.file(f.abs));
+      const target = client.file(`${c.prefix}/${f.rel}`);
+      if (f.size > STREAM_ABOVE) {
+        // Multipart streaming: memory stays at one chunk regardless of size.
+        const writer = target.writer({ partSize: 16 * 1024 * 1024, queueSize: 2 });
+        for await (const chunk of Bun.file(f.abs).stream()) writer.write(chunk);
+        await writer.end();
+      } else {
+        await target.write(Bun.file(f.abs));
+      }
       bytes += f.size;
     } catch (e) {
       errors.push(`${f.rel}: ${(e as Error).message}`);
@@ -223,7 +268,7 @@ export async function download(
   const errors: string[] = [];
   let done = 0, bytes = 0;
 
-  await pool(keys, opts.concurrency ?? 32, async (k) => {
+  await pool(keys, opts.concurrency ?? 32, (k) => k.size, async (k) => {
     if (opts.signal?.aborted) return;
     const rel = k.key.slice(c.prefix.length + 1);
     const dest = join(backupDir, rel.replace(/\//g, "\\"));
@@ -237,7 +282,13 @@ export async function download(
         return;
       }
       mkdirSync(dirname(dest), { recursive: true });
-      await Bun.write(dest, client.file(k.key));
+      if (k.size > STREAM_ABOVE) {
+        // Stream large objects to disk rather than materialising them in RAM.
+        const out = createWriteStream(dest);
+        await pipeline(client.file(k.key).stream() as unknown as NodeJS.ReadableStream, out);
+      } else {
+        await Bun.write(dest, client.file(k.key));
+      }
       bytes += k.size;
     } catch (e) {
       errors.push(`${rel}: ${(e as Error).message}`);
