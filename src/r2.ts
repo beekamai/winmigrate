@@ -145,9 +145,11 @@ async function backupFiles(
 }
 
 /** Files above this are streamed in parts instead of being held in memory. */
-const STREAM_ABOVE = 32 * 1024 * 1024;
+const STREAM_ABOVE = 16 * 1024 * 1024;
+/** Multipart chunk size; also the per-stream memory ceiling. */
+const PART_SIZE = 8 * 1024 * 1024;
 /** Upper bound on bytes held in memory across all in-flight transfers. */
-const MEMORY_BUDGET = 256 * 1024 * 1024;
+const MEMORY_BUDGET = 128 * 1024 * 1024;
 
 /**
  * Worker pool bounded by BOTH file count and total in-flight bytes.
@@ -186,7 +188,8 @@ export async function pool<T>(
       if (idx >= items.length) return;
       const item = items[idx]!;
       // Streamed transfers only hold a chunk at a time, so they book little.
-      const cost = Math.min(sizeOf(item), STREAM_ABOVE);
+      // A streamed item only ever holds one part in memory, so that is its cost.
+      const cost = Math.min(sizeOf(item), PART_SIZE * 2);
       await acquire(cost);
       try {
         await fn(item);
@@ -233,10 +236,33 @@ export async function upload(
     try {
       const target = client.file(`${c.prefix}/${f.rel}`);
       if (f.size > STREAM_ABOVE) {
-        // Multipart streaming: memory stays at one chunk regardless of size.
-        const writer = target.writer({ partSize: 16 * 1024 * 1024, queueSize: 2 });
-        for await (const chunk of Bun.file(f.abs).stream()) writer.write(chunk);
-        await writer.end();
+        // Multipart with backpressure. Without awaiting flush, the disk read
+        // outruns the upload and the difference piles up in memory — that is
+        // what grew the process to several gigabytes.
+        const writer = target.writer({ partSize: PART_SIZE, queueSize: 1 });
+        const reader = Bun.file(f.abs).stream().getReader();
+        try {
+          let pending = 0;
+          for (;;) {
+            if (opts.signal?.aborted) { aborted = true; break; }
+            const { done, value } = await reader.read();
+            if (done) break;
+            writer.write(value);
+            pending += value.byteLength;
+            if (pending >= PART_SIZE) {
+              await writer.flush();
+              pending = 0;
+            }
+          }
+        } finally {
+          reader.cancel().catch(() => {});
+        }
+        // end() may return a number or a promise depending on buffer state.
+        try {
+          await writer.end();
+        } catch {
+          if (!aborted) throw new Error("не удалось завершить многочастичную загрузку");
+        }
       } else {
         await target.write(Bun.file(f.abs));
       }

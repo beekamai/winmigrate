@@ -102,18 +102,50 @@ async function readClipboard(): Promise<string> {
   }
 }
 
+/**
+ * One keyboard reader for the whole app.
+ *
+ * Previously every helper attached and detached its own stdin listener; when a
+ * menu and a long-running task overlapped, the listeners fought and Esc simply
+ * stopped arriving. A single always-on reader with subscribers cannot desync.
+ */
+class Keyboard {
+  private subs = new Set<(k: Key) => void>();
+  private started = false;
+
+  private start(): void {
+    if (this.started) return;
+    this.started = true;
+    const stdin = process.stdin;
+    if (stdin.isTTY) stdin.setRawMode(true);
+    stdin.resume();
+    stdin.on("data", (d: Buffer) => {
+      const key = decode(d.toString("utf8"));
+      // Copy: a subscriber may unsubscribe while we iterate.
+      for (const fn of [...this.subs]) fn(key);
+    });
+  }
+
+  subscribe(fn: (k: Key) => void): () => void {
+    this.start();
+    this.subs.add(fn);
+    return () => this.subs.delete(fn);
+  }
+
+  next(): Promise<Key> {
+    return new Promise((resolve) => {
+      const off = this.subscribe((k) => {
+        off();
+        resolve(k);
+      });
+    });
+  }
+}
+
+const keyboard = new Keyboard();
+
 async function readKey(): Promise<Key> {
-  const stdin = process.stdin;
-  if (stdin.isTTY) stdin.setRawMode(true);
-  stdin.resume();
-  return new Promise((resolve) => {
-    const onData = (d: Buffer) => {
-      stdin.off("data", onData);
-      stdin.pause();
-      resolve(decode(d.toString("utf8")));
-    };
-    stdin.on("data", onData);
-  });
+  return keyboard.next();
 }
 
 export interface MenuItem {
@@ -252,27 +284,22 @@ export async function cancellable<T>(
   fn: (signal: AbortSignal) => Promise<T>,
 ): Promise<{ value?: T; cancelled: boolean }> {
   const ctrl = new AbortController();
-  const stdin = process.stdin;
-  const onData = (d: Buffer) => {
-    const s = d.toString("utf8");
-    if (s === "\x03" || s === "\x1b") ctrl.abort();
-  };
-
-  const wasRaw = stdin.isTTY ? stdin.isRaw : false;
-  if (stdin.isTTY) stdin.setRawMode(true);
-  stdin.on("data", onData);
-  stdin.resume();
+  const off = keyboard.subscribe((k) => {
+    if (k.name === "escape" || k.name === "ctrl-c") ctrl.abort();
+  });
+  // Ctrl+C may also arrive as a signal rather than as stdin data.
+  const onSigint = () => ctrl.abort();
+  process.on("SIGINT", onSigint);
 
   try {
     const value = await fn(ctrl.signal);
-    return { value, cancelled: false };
+    return { value, cancelled: ctrl.signal.aborted };
   } catch (e) {
     if ((e as Error).name === "AbortError") return { cancelled: true };
     throw e;
   } finally {
-    stdin.off("data", onData);
-    stdin.pause();
-    if (stdin.isTTY) stdin.setRawMode(wasRaw);
+    off();
+    process.off("SIGINT", onSigint);
   }
 }
 
