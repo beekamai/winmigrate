@@ -173,6 +173,86 @@ export function explain(abs: string, rule: Rule, size: number): { included: bool
   return { included: true, reason: "подходит" };
 }
 
+export interface ScanOptions {
+  signal?: AbortSignal;
+  onProgress?: (found: number, current: string) => void;
+}
+
+/**
+ * Async variant of scanProfile. The walk is synchronous by nature, so it yields
+ * to the event loop every few thousand entries — without that, Ctrl+C and the
+ * progress display never get a chance to run during a long scan.
+ */
+export async function scanProfileAsync(p: Profile, opts: ScanOptions = {}): Promise<ScannedFile[]> {
+  const out: ScannedFile[] = [];
+  const YIELD_EVERY = 2000;
+  let sinceYield = 0;
+
+  const breathe = async (current: string) => {
+    sinceYield = 0;
+    opts.onProgress?.(out.length, current);
+    await new Promise((r) => setImmediate(r));
+    if (opts.signal?.aborted) throw new DOMException("scan aborted", "AbortError");
+  };
+
+  const walkAsync = async (root: string, rule: Rule): Promise<void> => {
+    let dir;
+    try {
+      dir = opendirSync(root);
+    } catch {
+      return;
+    }
+    const subdirs: string[] = [];
+    try {
+      let ent = dir.readSync();
+      while (ent) {
+        if (++sinceYield >= YIELD_EVERY) await breathe(root);
+        const abs = join(root, ent.name);
+        if (ent.isSymbolicLink()) { ent = dir.readSync(); continue; }
+        const rel = relative(rule.path, abs);
+        if (excluded(rel, rule.exclude ?? []) || !includeAllowed(rel, rule.includeOnly)) {
+          ent = dir.readSync();
+          continue;
+        }
+        if (ent.isDirectory()) {
+          subdirs.push(abs);
+        } else if (ent.isFile()) {
+          try {
+            const inGit = insideGitDir(rel);
+            if (inGit || extAllowed(ent.name, rule.excludeExt, rule.includeExt)) {
+              const st = statSync(abs);
+              if (inGit || sizeAllowed(st.size, rule)) {
+                out.push({ abs, size: st.size, mtime: Math.floor(st.mtimeMs), rule, profile: p.name });
+              }
+            }
+          } catch { /* vanished or locked */ }
+        }
+        ent = dir.readSync();
+      }
+    } finally {
+      dir.closeSync();
+    }
+    // Recurse after closing the handle: deep trees would otherwise hold
+    // thousands of directory descriptors open at once.
+    for (const sub of subdirs) await walkAsync(sub, rule);
+  };
+
+  for (const rule of p.rules) {
+    if (opts.signal?.aborted) throw new DOMException("scan aborted", "AbortError");
+    let st;
+    try { st = statSync(rule.path); } catch { continue; }
+    if (st.isDirectory()) {
+      await walkAsync(rule.path, rule);
+    } else if (st.isFile()) {
+      if (sizeAllowed(st.size, rule) && extAllowed(rule.path, rule.excludeExt, rule.includeExt)) {
+        out.push({ abs: rule.path, size: st.size, mtime: Math.floor(st.mtimeMs), rule, profile: p.name });
+      }
+    }
+  }
+  opts.onProgress?.(out.length, "");
+  return out;
+}
+
 export function scanProfile(p: Profile): ScannedFile[] {
   const out: ScannedFile[] = [];
   for (const rule of p.rules) {

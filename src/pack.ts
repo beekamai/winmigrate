@@ -30,6 +30,8 @@ export interface PackOptions {
   dryRun: boolean;
   /** Re-pack everything even if the manifest already has an identical entry. */
   force?: boolean;
+  /** Stops the run cleanly; already-stored files are kept for a later resume. */
+  signal?: AbortSignal;
   onProgress?: (done: number, total: number, bytes: number) => void;
 }
 
@@ -186,11 +188,12 @@ export async function packAll(
     }
   };
   process.on("SIGINT", onSigint);
+  opts.signal?.addEventListener("abort", onSigint, { once: true });
 
   // Writes go through one SQLite connection, so transactions batch by worker turn.
   const worker = async () => {
     for (;;) {
-      if (aborted) return;
+      if (aborted || opts.signal?.aborted) return;
       const i = cursor++;
       if (i >= files.length) return;
       const f = files[i]!;
@@ -218,6 +221,7 @@ export async function packAll(
     await Promise.all(Array.from({ length: Math.max(1, opts.concurrency) }, worker));
   } finally {
     process.off("SIGINT", onSigint);
+    opts.signal?.removeEventListener("abort", onSigint);
   }
   opts.onProgress?.(done, files.length, bytes);
   return { files: done, bytes, errors, aborted };

@@ -9,7 +9,7 @@ import { Manifest } from "./manifest.ts";
 import { acquire } from "./lock.ts";
 import { detectMachine, parseRelocation, toPortable, type Relocation, type VolumeMap } from "./portable.ts";
 import { PROFILES, profileByName } from "./profiles.ts";
-import { scanProfile, type ScannedFile } from "./scan.ts";
+import { scanProfile, scanProfileAsync, type ScannedFile } from "./scan.ts";
 import { packAll } from "./pack.ts";
 import { restore, verify } from "./restore.ts";
 import { buildProjectMap } from "./rewrite.ts";
@@ -17,7 +17,8 @@ import { discover, inspect, saveProject } from "./gitsave.ts";
 import { detectRunning } from "./apps.ts";
 import * as r2 from "./r2.ts";
 import {
-  Progress, c, confirm, humanBytes, line, menu, multiSelect, pause, prompt, rule, title,
+  Progress, Spinner, c, cancellable, confirm, humanBytes, line, menu, multiSelect,
+  pause, prompt, rule, title,
 } from "./ui.ts";
 
 const DEFAULT_BACKUP = "D:\\wm-backup";
@@ -58,18 +59,34 @@ async function needPassphrase(st: State, profiles: string[], forRestore = false)
 }
 
 async function screenOverview(st: State): Promise<void> {
-  title("Обзор", "что попадёт в бэкап с этой машины");
-  line(`  ${c.grey}сканирую…${c.reset}`);
+  title("Обзор", "что попадёт в бэкап · Esc — прервать");
+  line();
 
-  let totalF = 0, totalB = 0;
   const rows: string[][] = [];
-  for (const p of PROFILES) {
-    const files = scanProfile(p);
-    const bytes = files.reduce((s, f) => s + f.size, 0);
-    totalF += files.length;
-    totalB += bytes;
-    const enc = p.rules.some((r) => r.secret) ? `${c.yellow}🔒${c.reset}` : "  ";
-    rows.push([p.name, String(files.length), humanBytes(bytes), enc, p.description]);
+  let totalF = 0, totalB = 0;
+
+  const res = await cancellable(async (signal) => {
+    for (const p of PROFILES) {
+      const sp = new Spinner(`сканирую ${p.name}`);
+      const files = await scanProfileAsync(p, {
+        signal,
+        onProgress: (found, current) => sp.tick(`${found} файлов · ${current}`),
+      });
+      sp.clear();
+      const bytes = files.reduce((s, f) => s + f.size, 0);
+      totalF += files.length;
+      totalB += bytes;
+      const enc = p.rules.some((r) => r.secret) ? `${c.yellow}🔒${c.reset}` : "  ";
+      rows.push([p.name, String(files.length), humanBytes(bytes), enc, p.description]);
+      line(`  ${c.bold}${p.name.padEnd(15)}${c.reset} ${String(files.length).padStart(8)} ${humanBytes(bytes).padStart(9)} ${enc}`);
+    }
+    return true;
+  });
+
+  if (res.cancelled) {
+    line(`\n  ${c.yellow}прервано${c.reset}`);
+    await pause();
+    return;
   }
 
   title("Обзор", "что попадёт в бэкап с этой машины");
@@ -133,8 +150,8 @@ async function screenBackup(st: State): Promise<void> {
 
   if (!(await needPassphrase(st, chosen))) return;
 
-  title("Бэкап", `профили: ${chosen.join(", ")}`);
-  line(`  ${c.grey}сканирую файлы…${c.reset}\n`);
+  title("Бэкап", `профили: ${chosen.join(", ")} · Esc — прервать сканирование`);
+  line();
 
   const machine = await detectMachine();
   let release: () => void;
@@ -154,19 +171,43 @@ async function screenBackup(st: State): Promise<void> {
     mf.setMeta("projectMap", JSON.stringify(map));
   } catch { /* no Claude config on this machine */ }
 
-  let all: ScannedFile[] = [];
-  for (const n of chosen) {
-    const p = profileByName(n)!;
-    all = all.concat(scanProfile(p));
-  }
-
-  const bar = new Progress(`Упаковка ${all.length} файлов`);
-  const res = await packAll(all, mf, machine, {
-    concurrency: Math.min(16, navigator.hardwareConcurrency ?? 8),
-    passphrase: st.passphrase ?? undefined,
-    dryRun: false,
-    onProgress: (done, total, bytes) => bar.render(done, total, bytes),
+  const scanned = await cancellable(async (signal) => {
+    let all: ScannedFile[] = [];
+    for (const n of chosen) {
+      const p = profileByName(n)!;
+      const sp = new Spinner(`сканирую ${p.name}`);
+      const files = await scanProfileAsync(p, {
+        signal,
+        onProgress: (found, current) => sp.tick(`${found} файлов · ${current}`),
+      });
+      sp.clear();
+      line(`  ${c.grey}${p.name.padEnd(15)} ${String(files.length).padStart(8)} файлов${c.reset}`);
+      all = all.concat(files);
+    }
+    return all;
   });
+
+  if (scanned.cancelled || !scanned.value) {
+    line(`\n  ${c.yellow}сканирование прервано — ничего не записано${c.reset}`);
+    mf.close();
+    release();
+    await pause();
+    return;
+  }
+  const all = scanned.value;
+  line();
+
+  const bar = new Progress(`Упаковка ${all.length} файлов  ${c.grey}(Esc — прервать)${c.reset}`);
+  const packRun = await cancellable((signal) =>
+    packAll(all, mf, machine, {
+      concurrency: Math.min(16, navigator.hardwareConcurrency ?? 8),
+      passphrase: st.passphrase ?? undefined,
+      dryRun: false,
+      signal,
+      onProgress: (done, total, bytes) => bar.render(done, total, bytes),
+    }),
+  );
+  const res = packRun.value ?? { files: 0, bytes: 0, errors: [], aborted: true };
 
   const store = mf.storeStats();
   if (res.aborted) {

@@ -243,6 +243,62 @@ export async function pause(msg = "Enter — продолжить"): Promise<voi
   }
 }
 
+/**
+ * Runs a long operation while Esc / Ctrl+C can abort it. The operation must
+ * honour the AbortSignal — a synchronous loop that never yields cannot be
+ * interrupted no matter what is listening.
+ */
+export async function cancellable<T>(
+  fn: (signal: AbortSignal) => Promise<T>,
+): Promise<{ value?: T; cancelled: boolean }> {
+  const ctrl = new AbortController();
+  const stdin = process.stdin;
+  const onData = (d: Buffer) => {
+    const s = d.toString("utf8");
+    if (s === "\x03" || s === "\x1b") ctrl.abort();
+  };
+
+  const wasRaw = stdin.isTTY ? stdin.isRaw : false;
+  if (stdin.isTTY) stdin.setRawMode(true);
+  stdin.on("data", onData);
+  stdin.resume();
+
+  try {
+    const value = await fn(ctrl.signal);
+    return { value, cancelled: false };
+  } catch (e) {
+    if ((e as Error).name === "AbortError") return { cancelled: true };
+    throw e;
+  } finally {
+    stdin.off("data", onData);
+    stdin.pause();
+    if (stdin.isTTY) stdin.setRawMode(wasRaw);
+  }
+}
+
+/** Single-line spinner for work with no measurable total. */
+export class Spinner {
+  private frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+  private i = 0;
+  private last = 0;
+
+  constructor(private label: string) {}
+
+  tick(detail = ""): void {
+    const now = Date.now();
+    if (now - this.last < 80) return;
+    this.last = now;
+    const f = this.frames[this.i++ % this.frames.length]!;
+    const max = width() - this.label.length - 12;
+    const shown = detail.length > max ? "…" + detail.slice(-max) : detail;
+    write(`\r${ESC}2K  ${c.accent}${f}${c.reset} ${this.label}  ${c.grey}${shown}${c.reset}`);
+  }
+
+  clear(): void {
+    write(`\r${ESC}2K`);
+  }
+}
+
 /** Redrawing progress bar. Call render() as often as you like; it is cheap. */
 export class Progress {
   private last = 0;
