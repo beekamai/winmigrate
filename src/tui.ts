@@ -295,16 +295,44 @@ async function screenUpload(st: State): Promise<void> {
     return;
   }
 
-  title("Заливка в R2", `${cfg.bucket}/${cfg.prefix}`);
+  title("Заливка в R2", `${cfg.bucket}/${cfg.prefix} · Esc — остановить`);
   line();
-  const bar = new Progress("Отправка в Cloudflare R2");
-  const res = await r2.upload(dir, cfg, {
-    concurrency: 8,
-    onProgress: (p) => bar.render(p.done, p.total, p.bytes, p.current),
-  });
-  bar.done(
-    `загружено ${res.uploaded}, пропущено ${res.skipped} (уже в облаке) · ${humanBytes(res.bytes)}`,
+
+  const prep = new Spinner("подготовка");
+  const bar = new Progress(`Отправка в Cloudflare R2  ${c.grey}(Esc — остановить)${c.reset}`);
+  let started = false;
+
+  const run = await cancellable((signal) =>
+    r2.upload(dir, cfg, {
+      signal,
+      onProgress: (p) => {
+        if (p.phase === "transfer") {
+          if (!started) { prep.clear(); started = true; }
+          bar.render(p.done, p.total, p.bytes, p.current);
+        } else {
+          prep.tick(p.phase === "listing" ? p.current : `читаю каталог · ${p.current}`);
+        }
+      },
+    }),
   );
+  if (!started) prep.clear();
+
+  const res = run.value;
+  if (run.cancelled || !res) {
+    line(`\n  ${c.yellow}остановлено — загруженное остаётся в облаке${c.reset}`);
+    line(`  ${c.grey}запусти заливку снова: отправит только недостающее${c.reset}`);
+    await pause();
+    return;
+  }
+
+  if (res.aborted) {
+    bar.fail(`остановлено · отправлено ${res.uploaded} · ${humanBytes(res.bytes)}`);
+    line(`  ${c.grey}повторный запуск дошлёт остальное${c.reset}`);
+  } else {
+    bar.done(
+      `отправлено ${res.uploaded} · пропущено ${res.skipped} (уже в облаке) · ${humanBytes(res.bytes)}`,
+    );
+  }
   if (res.errors.length) {
     line(`  ${c.red}ошибок: ${res.errors.length}${c.reset}`);
     for (const e of res.errors.slice(0, 3)) line(`    ${c.grey}${e}${c.reset}`);
@@ -320,14 +348,37 @@ async function screenDownload(st: State): Promise<void> {
   if (dir === null) return;
   st.backupDir = dir;
 
-  title("Скачивание из R2", `${cfg.bucket}/${cfg.prefix}`);
+  title("Скачивание из R2", `${cfg.bucket}/${cfg.prefix} · Esc — остановить`);
   line();
-  const bar = new Progress("Загрузка из Cloudflare R2");
-  const res = await r2.download(dir, cfg, {
-    concurrency: 8,
-    onProgress: (p) => bar.render(p.done, p.total, p.bytes, p.current),
-  });
-  bar.done(`${res.downloaded} объектов · ${humanBytes(res.bytes)} → ${dir}`);
+
+  const prep = new Spinner("получаю список объектов");
+  const bar = new Progress(`Загрузка из Cloudflare R2  ${c.grey}(Esc — остановить)${c.reset}`);
+  let started = false;
+
+  const run = await cancellable((signal) =>
+    r2.download(dir, cfg, {
+      signal,
+      onProgress: (p) => {
+        if (p.phase === "transfer") {
+          if (!started) { prep.clear(); started = true; }
+          bar.render(p.done, p.total, p.bytes, p.current);
+        } else {
+          prep.tick(p.current);
+        }
+      },
+    }),
+  );
+  if (!started) prep.clear();
+
+  const res = run.value;
+  if (run.cancelled || !res) {
+    line(`\n  ${c.yellow}остановлено — скачанное сохранено${c.reset}`);
+    line(`  ${c.grey}запусти снова: докачает недостающее${c.reset}`);
+    await pause();
+    return;
+  }
+  if (res.aborted) bar.fail(`остановлено · получено ${res.downloaded} · ${humanBytes(res.bytes)}`);
+  else bar.done(`${res.downloaded} объектов · ${humanBytes(res.bytes)} → ${dir}`);
   if (res.errors.length) {
     line(`  ${c.red}ошибок: ${res.errors.length}${c.reset}`);
     for (const e of res.errors.slice(0, 3)) line(`    ${c.grey}${e}${c.reset}`);

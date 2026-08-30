@@ -72,30 +72,87 @@ export interface SyncProgress {
   totalBytes: number;
   current: string;
   skipped: number;
+  /** Set while building file lists, before any transfer starts. */
+  phase?: "scanning" | "listing" | "transfer";
+}
+
+export interface SyncOptions {
+  concurrency?: number;
+  signal?: AbortSignal;
+  onProgress?: (p: SyncProgress) => void;
+}
+
+/** Lists every key already in the bucket under the prefix, with sizes. */
+async function remoteIndex(
+  client: Bun.S3Client,
+  prefix: string,
+  opts: SyncOptions,
+): Promise<Map<string, number>> {
+  const index = new Map<string, number>();
+  let token: string | undefined;
+  do {
+    if (opts.signal?.aborted) throw new DOMException("aborted", "AbortError");
+    const page = await client.list({ prefix: `${prefix}/`, continuationToken: token, maxKeys: 1000 });
+    for (const o of page.contents ?? []) {
+      if (o.key) index.set(o.key, o.size ?? 0);
+    }
+    opts.onProgress?.({
+      done: 0, total: 0, bytes: 0, totalBytes: 0, skipped: 0,
+      current: `в облаке уже ${index.size} объектов`, phase: "listing",
+    });
+    token = page.isTruncated ? page.nextContinuationToken : undefined;
+  } while (token);
+  return index;
 }
 
 /** Every file that belongs to a backup directory, as store-relative keys. */
-function backupFiles(root: string): { rel: string; abs: string; size: number }[] {
+async function backupFiles(
+  root: string,
+  opts: SyncOptions,
+): Promise<{ rel: string; abs: string; size: number }[]> {
   const out: { rel: string; abs: string; size: number }[] = [];
-  const walk = (dir: string, base: string) => {
-    for (const name of readdirSync(dir)) {
+  let sinceYield = 0;
+
+  const walk = async (dir: string, base: string): Promise<void> => {
+    const names = readdirSync(dir);
+    const subdirs: string[] = [];
+    for (const name of names) {
       const abs = join(dir, name);
       const st = statSync(abs);
-      if (st.isDirectory()) walk(abs, base);
+      if (st.isDirectory()) subdirs.push(abs);
       // WAL/SHM are transient SQLite sidecars; the checkpointed .db is enough.
       else if (!name.endsWith("-wal") && !name.endsWith("-shm")) {
         out.push({ rel: abs.slice(base.length + 1).replace(/\\/g, "/"), abs, size: st.size });
       }
+      // The blob store holds hundreds of thousands of files; without yielding,
+      // this walk blocks the event loop and looks like a hang.
+      if (++sinceYield >= 2000) {
+        sinceYield = 0;
+        opts.onProgress?.({
+          done: 0, total: 0, bytes: 0, totalBytes: 0, skipped: 0,
+          current: `найдено ${out.length} файлов`, phase: "scanning",
+        });
+        await new Promise((r) => setImmediate(r));
+        if (opts.signal?.aborted) throw new DOMException("aborted", "AbortError");
+      }
     }
+    for (const s of subdirs) await walk(s, base);
   };
-  walk(root, root);
+
+  await walk(root, root);
   return out;
 }
 
-async function pool<T>(items: T[], limit: number, fn: (t: T) => Promise<void>): Promise<void> {
+async function pool<T>(
+  items: T[],
+  limit: number,
+  fn: (t: T) => Promise<void>,
+  signal?: AbortSignal,
+): Promise<void> {
   let i = 0;
   const worker = async () => {
     for (;;) {
+      if (signal?.aborted) return;
       const idx = i++;
       if (idx >= items.length) return;
       await fn(items[idx]!);
@@ -107,69 +164,74 @@ async function pool<T>(items: T[], limit: number, fn: (t: T) => Promise<void>): 
 export async function upload(
   backupDir: string,
   c: R2Config,
-  opts: { concurrency?: number; onProgress?: (p: SyncProgress) => void } = {},
-): Promise<{ uploaded: number; skipped: number; bytes: number; errors: string[] }> {
+  opts: SyncOptions = {},
+): Promise<{ uploaded: number; skipped: number; bytes: number; errors: string[]; aborted: boolean }> {
   const client = makeClient(c);
-  const files = backupFiles(backupDir);
   // Checkpoint WAL so manifest.db on its own is a complete, consistent copy.
   checkpoint(backupDir);
 
-  const totalBytes = files.reduce((s, f) => s + f.size, 0);
-  const errors: string[] = [];
-  let done = 0, skipped = 0, bytes = 0;
+  const files = await backupFiles(backupDir, opts);
+  // One listing instead of an existence check per object: with 228k blobs that
+  // is ~230 requests rather than 228k round-trips.
+  const remote = await remoteIndex(client, c.prefix, opts);
 
-  await pool(files, opts.concurrency ?? 8, async (f) => {
+  const pending = files.filter((f) => {
     const key = `${c.prefix}/${f.rel}`;
+    const known = remote.get(key);
+    // Blobs are content-addressed and immutable: same key means same bytes.
+    if (f.rel.startsWith("blobs/")) return known === undefined;
+    // The manifest changes between runs, so re-upload unless size matches.
+    return known !== f.size;
+  });
+
+  const skipped = files.length - pending.length;
+  const totalBytes = pending.reduce((s, f) => s + f.size, 0);
+  const errors: string[] = [];
+  let done = 0, bytes = 0, aborted = false;
+
+  await pool(pending, opts.concurrency ?? 12, async (f) => {
+    if (opts.signal?.aborted) { aborted = true; return; }
     try {
-      const remote = client.file(key);
-      // Blobs are immutable (hash-named): if it exists, it is identical.
-      const isBlob = f.rel.startsWith("blobs/");
-      if (isBlob && (await remote.exists())) {
-        skipped++;
-      } else {
-        await remote.write(Bun.file(f.abs));
-        bytes += f.size;
-      }
+      await client.file(`${c.prefix}/${f.rel}`).write(Bun.file(f.abs));
+      bytes += f.size;
     } catch (e) {
       errors.push(`${f.rel}: ${(e as Error).message}`);
     }
     done++;
-    opts.onProgress?.({ done, total: files.length, bytes, totalBytes, current: f.rel, skipped });
-  });
+    opts.onProgress?.({
+      done, total: pending.length, bytes, totalBytes, current: f.rel, skipped, phase: "transfer",
+    });
+  }, opts.signal);
 
-  return { uploaded: done - skipped, skipped, bytes, errors };
+  return { uploaded: done, skipped, bytes, errors, aborted: aborted || !!opts.signal?.aborted };
 }
 
 export async function download(
   backupDir: string,
   c: R2Config,
-  opts: { concurrency?: number; onProgress?: (p: SyncProgress) => void } = {},
-): Promise<{ downloaded: number; bytes: number; errors: string[] }> {
+  opts: SyncOptions = {},
+): Promise<{ downloaded: number; bytes: number; errors: string[]; aborted: boolean }> {
   const client = makeClient(c);
   mkdirSync(backupDir, { recursive: true });
 
-  const keys: { key: string; size: number }[] = [];
-  let token: string | undefined;
-  do {
-    const page = await client.list({ prefix: `${c.prefix}/`, continuationToken: token, maxKeys: 1000 });
-    for (const o of page.contents ?? []) {
-      if (o.key) keys.push({ key: o.key, size: o.size ?? 0 });
-    }
-    token = page.isTruncated ? page.nextContinuationToken : undefined;
-  } while (token);
+  const index = await remoteIndex(client, c.prefix, opts);
+  const keys = [...index].map(([key, size]) => ({ key, size }));
 
   const totalBytes = keys.reduce((s, k) => s + k.size, 0);
   const errors: string[] = [];
   let done = 0, bytes = 0;
 
-  await pool(keys, opts.concurrency ?? 8, async (k) => {
+  await pool(keys, opts.concurrency ?? 12, async (k) => {
+    if (opts.signal?.aborted) return;
     const rel = k.key.slice(c.prefix.length + 1);
     const dest = join(backupDir, rel.replace(/\//g, "\\"));
     try {
       // Resume-friendly: an already-complete local file is not fetched again.
       if (existsSync(dest) && statSync(dest).size === k.size && k.size > 0) {
         done++;
-        opts.onProgress?.({ done, total: keys.length, bytes, totalBytes, current: rel, skipped: 0 });
+        opts.onProgress?.({
+          done, total: keys.length, bytes, totalBytes, current: rel, skipped: 0, phase: "transfer",
+        });
         return;
       }
       mkdirSync(dirname(dest), { recursive: true });
@@ -179,10 +241,12 @@ export async function download(
       errors.push(`${rel}: ${(e as Error).message}`);
     }
     done++;
-    opts.onProgress?.({ done, total: keys.length, bytes, totalBytes, current: rel, skipped: 0 });
-  });
+    opts.onProgress?.({
+      done, total: keys.length, bytes, totalBytes, current: rel, skipped: 0, phase: "transfer",
+    });
+  }, opts.signal);
 
-  return { downloaded: done, bytes, errors };
+  return { downloaded: done, bytes, errors, aborted: !!opts.signal?.aborted };
 }
 
 /** Folds the WAL into the main database file before it is copied anywhere. */
