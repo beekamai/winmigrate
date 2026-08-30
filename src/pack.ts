@@ -11,7 +11,7 @@ import { createHash } from "node:crypto";
 import { Manifest } from "./manifest.ts";
 import { encrypt } from "./crypto.ts";
 import { isIncompressible, humanBytes, type ScannedFile } from "./scan.ts";
-import { toPortable, type MachineProfile } from "./portable.ts";
+import { normalizeSep, toPortable, type MachineProfile } from "./portable.ts";
 
 /** Above this size we never buffer the whole file. */
 const STREAM_THRESHOLD = 128 * 1024 * 1024;
@@ -54,7 +54,11 @@ async function packOne(
   machine: MachineProfile,
   opts: PackOptions,
 ): Promise<number> {
-  const portable = toPortable(f.abs, machine);
+  // A rule may declare its own destination root (e.g. gather scattered media
+  // into one review folder) instead of restoring to the original location.
+  const portable = f.rule.relocateTo
+    ? normalizeSep(f.rule.relocateTo) + normalizeSep(f.abs).slice(normalizeSep(f.rule.path).length)
+    : toPortable(f.abs, machine);
   const secret = f.rule.secret === true;
   const streaming = f.size >= STREAM_THRESHOLD;
 

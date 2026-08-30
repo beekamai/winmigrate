@@ -89,11 +89,26 @@ bun run src/cli.ts gitsave                    # план; --apply чтобы в�
 | `vault` | Obsidian vault + базы KeePassXC | 🔒 |
 | `wallets` | Electrum, Tonkeeper, Ledger Live, Bitwarden | 🔒 |
 | `browsers` | Chrome/Firefox: закладки, история (см. ограничение ниже) | 🔒 |
+| `personal-media` | Фото/видео/GIF/PSD из Загрузок и Рабочего стола → собираются в `D:\Media-Inbox\` для ручного разбора | |
 | `media` | DCIM, LoRA, outputs, Videos — **самый тяжёлый** | |
 | `secrets` | SSH, `mcp-sshpilot/servers.json`, Termius, токены | 🔒 |
 
 Правки — в `src/profiles.ts`. Поля `Rule`: `path`, `exclude`, `includeOnly`,
-`excludeExt`, `maxFileSize`, `rewrite`, `secret`, `store`.
+`includeExt`, `excludeExt`, `maxFileSize`, `minFileSize`, `rewrite`, `secret`,
+`store`, `relocateTo`.
+
+В `exclude` работают три вида шаблонов: точное имя сегмента (`node_modules`),
+подстрока пути (`user_data/cache`), префикс сегмента (`DataExport_*`) и
+суффикс имени (`*.zip`).
+
+### Сбор разбросанных файлов в одну папку
+
+`relocateTo` задаёт правилу собственный корень назначения: файлы восстановятся
+туда, сохранив структуру ниже `path`, а не разъедутся по исходным местам.
+Так работает `personal-media` — фото и PSD из Загрузок и с Рабочего стола
+собираются в `D:\Media-Inbox\Downloads\…` и `D:\Media-Inbox\Desktop\…`.
+Это не то же самое, что `--relocate`: `relocateTo` — свойство правила и
+действует всегда, `--relocate` задаётся при восстановлении.
 
 ---
 

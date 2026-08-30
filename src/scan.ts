@@ -47,16 +47,30 @@ function excluded(rel: string, extra: string[]): boolean {
       if (relFwd.toLowerCase().endsWith(pat.slice(1).toLowerCase())) return true;
       continue;
     }
+    // Trailing wildcard matches a whole path segment by prefix, e.g. "DataExport_*".
+    if (pat.endsWith("*")) {
+      const p = pat.slice(0, -1).toLowerCase();
+      if (segs.some((s) => s.toLowerCase().startsWith(p))) return true;
+      continue;
+    }
     if (segs.some((s) => s.toLowerCase() === pat.toLowerCase())) return true;
   }
   return false;
 }
 
-function extAllowed(name: string, excludeExt?: string[]): boolean {
-  if (!excludeExt?.length) return true;
+function extAllowed(name: string, excludeExt?: string[], includeExt?: string[]): boolean {
   const dot = name.lastIndexOf(".");
-  if (dot < 0) return true;
-  return !excludeExt.includes(name.slice(dot).toLowerCase());
+  const ext = dot < 0 ? "" : name.slice(dot).toLowerCase();
+  if (includeExt?.length) return ext !== "" && includeExt.includes(ext);
+  if (!excludeExt?.length) return true;
+  if (!ext) return true;
+  return !excludeExt.includes(ext);
+}
+
+function sizeAllowed(size: number, rule: Rule): boolean {
+  if (rule.maxFileSize !== undefined && size > rule.maxFileSize) return false;
+  if (rule.minFileSize !== undefined && size < rule.minFileSize) return false;
+  return true;
 }
 
 function includeAllowed(rel: string, includeOnly?: string[]): boolean {
@@ -94,12 +108,12 @@ function walk(root: string, rule: Rule, profile: string, out: ScannedFile[]): vo
         walk(abs, rule, profile, out);
       } else if (ent.isFile()) {
         try {
-          if (!extAllowed(ent.name, rule.excludeExt)) {
+          if (!extAllowed(ent.name, rule.excludeExt, rule.includeExt)) {
             ent = dir.readSync();
             continue;
           }
           const st = statSync(abs);
-          if (rule.maxFileSize === undefined || st.size <= rule.maxFileSize) {
+          if (sizeAllowed(st.size, rule)) {
             out.push({ abs, size: st.size, mtime: Math.floor(st.mtimeMs), rule, profile });
           }
         } catch {
@@ -125,8 +139,7 @@ export function scanProfile(p: Profile): ScannedFile[] {
     if (st.isDirectory()) {
       walk(rule.path, rule, p.name, out);
     } else if (st.isFile()) {
-      const over = rule.maxFileSize !== undefined && st.size > rule.maxFileSize;
-      if (!over && extAllowed(rule.path, rule.excludeExt)) {
+      if (sizeAllowed(st.size, rule) && extAllowed(rule.path, rule.excludeExt, rule.includeExt)) {
         out.push({ abs: rule.path, size: st.size, mtime: Math.floor(st.mtimeMs), rule, profile: p.name });
       }
     }

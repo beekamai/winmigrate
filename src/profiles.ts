@@ -18,8 +18,18 @@ export interface Rule {
   rewrite?: RewriteKind;
   /** Skip files larger than this. Source code never is; databases and blobs are. */
   maxFileSize?: number;
+  /** Skip files smaller than this — filters out icons and sprite junk. */
+  minFileSize?: number;
   /** Skip these extensions (lowercase, with dot). */
   excludeExt?: string[];
+  /** Take ONLY these extensions (lowercase, with dot). */
+  includeExt?: string[];
+  /**
+   * Restore this rule's files under a different root instead of their original
+   * location, preserving the tree below `path`. Used to gather scattered media
+   * into one folder for manual review rather than scattering it again.
+   */
+  relocateTo?: string;
   /** Encrypt with the backup passphrase. */
   secret?: boolean;
   /** Skip compression: already-compressed payloads (media, model weights). */
@@ -65,6 +75,21 @@ const BINARY_EXT = [
   ".exe", ".dll", ".pdb", ".ipch", ".lib", ".so", ".dylib", ".apk", ".dex",
   ".jar", ".aab", ".msi", ".zip", ".7z", ".rar", ".iso", ".ress", ".ttc",
   ".blend", ".blend1", ".unitypackage", ".pak", ".wad",
+];
+
+/** Photos, video, animation and layered design sources worth reviewing by hand. */
+const MEDIA_EXT = [
+  // photos and images
+  ".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif", ".avif", ".bmp", ".tif", ".tiff",
+  // animation
+  ".gif", ".apng", ".webm",
+  // video
+  ".mp4", ".mov", ".mkv", ".avi", ".m4v", ".mpg", ".mpeg", ".wmv",
+  // layered / vector design sources — logos and avatars live here
+  ".psd", ".psb", ".ai", ".eps", ".svg", ".xcf", ".fig", ".sketch",
+  ".afphoto", ".afdesign", ".cdr", ".kra", ".clip",
+  // camera raw
+  ".cr2", ".cr3", ".nef", ".arw", ".dng", ".orf", ".rw2", ".raf",
 ];
 
 /** Local database/state directories that a service recreates on first run. */
@@ -242,6 +267,35 @@ export const PROFILES: Profile[] = [
       { path: `${LOCAL}\\Google\\Chrome\\User Data\\Local State`, secret: true },
       { path: `${ROAMING}\\Mozilla\\Firefox\\Profiles`, exclude: [...ELECTRON_CACHE, "storage/default", "minidumps"], secret: true },
       { path: `${ROAMING}\\dolphin_anty`, exclude: [...ELECTRON_CACHE], secret: true },
+    ],
+  },
+  {
+    name: "personal-media",
+    description: "Фото/видео/GIF/PSD из Загрузок и с Рабочего стола → одна папка для ручного разбора",
+    rules: [
+      {
+        path: `${HOME}\\Downloads`,
+        includeExt: MEDIA_EXT,
+        // Below this it is favicons, sprites and emoji, not photos or logos.
+        minFileSize: 10 * 1024,
+        // Telegram chat exports are 31k files of conversation attachments —
+        // a separate archive, not the personal photos this profile is for.
+        exclude: ["DataExport_*", "ChatExport_*"],
+        store: true,
+        relocateTo: "{{VOL:DISK_D}}\\Media-Inbox\\Downloads",
+      },
+      {
+        path: `${HOME}\\Desktop`,
+        includeExt: MEDIA_EXT,
+        minFileSize: 10 * 1024,
+        // Project asset folders would drown the real photos in sprites and icons.
+        exclude: [...CODE_ARTEFACTS, "node_modules", "assets", "public", "static",
+                  "img", "images", "icons", "textures", "sprites", "materials",
+                  // Editing scratch: proxies, renders and cache, not source photos.
+                  "davinci resolve", "DataExport_*", "ChatExport_*"],
+        store: true,
+        relocateTo: "{{VOL:DISK_D}}\\Media-Inbox\\Desktop",
+      },
     ],
   },
   {

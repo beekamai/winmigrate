@@ -99,6 +99,11 @@ Raw directory size is a terrible guide to what is worth keeping:
   data, never assume it sits under the app's config directory.
 - `.claude.json` must be treated as a secret: MCP server definitions embed live
   API keys in their `env` blocks.
+- `personal-media` first measured 34,458 files / 6.7 GB. Two Telegram chat
+  exports (`DataExport_*`) accounted for **31k of those files**; excluding them
+  and DaVinci scratch left 1,425 files / 3.4 GB — an amount a human can actually
+  review. A media filter without a `minFileSize` floor also sweeps up favicons
+  and sprite sheets.
 
 ## Gotchas
 
