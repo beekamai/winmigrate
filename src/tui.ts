@@ -26,6 +26,7 @@ const DEFAULT_BACKUP = "D:\\wm-backup";
 interface State {
   backupDir: string;
   passphrase: string | null;
+  uploadConcurrency: number;
 }
 
 function profileItems(preselect: string[] = []) {
@@ -295,6 +296,18 @@ async function screenUpload(st: State): Promise<void> {
     return;
   }
 
+  const speed = await menu(
+    [
+      { label: "Обычная (32 потока)", hint: "подходит большинству каналов", value: "32" },
+      { label: "Быстрая (64 потока)", hint: "если канал широкий, а скорость упирается в задержки", value: "64" },
+      { label: "Щадящая (8 потоков)", hint: "если интернет нужен для другого", value: "8" },
+    ],
+    "Скорость заливки",
+    "мелких файлов много, поэтому решает число параллельных запросов",
+  );
+  if (speed === null) return;
+  st.uploadConcurrency = Number(speed);
+
   title("Заливка в R2", `${cfg.bucket}/${cfg.prefix} · Esc — остановить`);
   line();
 
@@ -305,6 +318,7 @@ async function screenUpload(st: State): Promise<void> {
   const run = await cancellable((signal) =>
     r2.upload(dir, cfg, {
       signal,
+      concurrency: st.uploadConcurrency,
       onProgress: (p) => {
         if (p.phase === "transfer") {
           if (!started) { prep.clear(); started = true; }
@@ -358,6 +372,7 @@ async function screenDownload(st: State): Promise<void> {
   const run = await cancellable((signal) =>
     r2.download(dir, cfg, {
       signal,
+      concurrency: st.uploadConcurrency,
       onProgress: (p) => {
         if (p.phase === "transfer") {
           if (!started) { prep.clear(); started = true; }
@@ -543,7 +558,7 @@ function write(s: string): void {
 }
 
 export async function runTui(): Promise<void> {
-  const st: State = { backupDir: DEFAULT_BACKUP, passphrase: null };
+  const st: State = { backupDir: DEFAULT_BACKUP, passphrase: null, uploadConcurrency: 32 };
 
   for (;;) {
     const cfg = r2.loadConfig();

@@ -189,7 +189,9 @@ export async function upload(
   const errors: string[] = [];
   let done = 0, bytes = 0, aborted = false;
 
-  await pool(pending, opts.concurrency ?? 12, async (f) => {
+  // Blobs average a few hundred KB, so throughput is bound by per-request
+  // latency rather than bandwidth: more parallel requests, not bigger ones.
+  await pool(pending, opts.concurrency ?? 32, async (f) => {
     if (opts.signal?.aborted) { aborted = true; return; }
     try {
       await client.file(`${c.prefix}/${f.rel}`).write(Bun.file(f.abs));
@@ -221,7 +223,7 @@ export async function download(
   const errors: string[] = [];
   let done = 0, bytes = 0;
 
-  await pool(keys, opts.concurrency ?? 12, async (k) => {
+  await pool(keys, opts.concurrency ?? 32, async (k) => {
     if (opts.signal?.aborted) return;
     const rel = k.key.slice(c.prefix.length + 1);
     const dest = join(backupDir, rel.replace(/\//g, "\\"));

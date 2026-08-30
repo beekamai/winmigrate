@@ -300,6 +300,16 @@ export class Spinner {
 }
 
 /** Redrawing progress bar. Call render() as often as you like; it is cheap. */
+function fmtDuration(seconds: number): string {
+  if (!isFinite(seconds) || seconds <= 0) return "—";
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = Math.floor(seconds % 60);
+  if (h) return `${h} ч ${m} мин`;
+  if (m) return `${m} мин ${s} с`;
+  return `${s} с`;
+}
+
 export class Progress {
   private last = 0;
   private started = Date.now();
@@ -307,37 +317,47 @@ export class Progress {
 
   constructor(private label: string) {}
 
+  /** Writes one line, clearing whatever was there before. */
+  private put(s: string): void {
+    write(`${ESC}2K${s}\n`);
+  }
+
   render(done: number, total: number, bytes: number, current = ""): void {
     const now = Date.now();
-    if (now - this.last < 60 && done < total) return;
+    if (now - this.last < 100 && done < total) return;
     this.last = now;
 
-    const w = width() - 24;
+    const w = Math.max(20, width() - 46);
     const pct = total ? done / total : 0;
     const filled = Math.round(pct * w);
     const elapsed = (now - this.started) / 1000;
     const rate = elapsed > 0 ? bytes / elapsed : 0;
+    const perFile = done > 0 ? elapsed / done : 0;
+    const eta = perFile > 0 ? (total - done) * perFile : 0;
 
     const bar = `${c.accent}${"█".repeat(filled)}${c.grey}${"░".repeat(Math.max(0, w - filled))}${c.reset}`;
     const stat = `${(pct * 100).toFixed(1).padStart(5)}%  ${humanBytes(rate)}/s`;
-    const detail = current
-      ? `  ${c.grey}${current.length > width() - 6 ? "…" + current.slice(-(width() - 8)) : current}${c.reset}`
-      : "";
+    // Truncate from the left: the tail of a path is the informative part.
+    const room = width() - 8;
+    const shown = current.length > room ? "…" + current.slice(-(room - 1)) : current;
 
     if (this.lines) write(`${ESC}${this.lines}A`);
-    line(`  ${this.label}`);
-    line(`  ${bar} ${stat}`);
-    line(`  ${c.grey}${done}/${total} файлов · ${humanBytes(bytes)}${c.reset}${detail}`);
-    this.lines = 3;
+    this.put(`  ${this.label}`);
+    this.put(`  ${bar} ${stat}`);
+    this.put(
+      `  ${c.grey}${done}/${total} · ${humanBytes(bytes)} · осталось ~${fmtDuration(eta)}${c.reset}`,
+    );
+    this.put(`  ${c.grey}${shown}${c.reset}`);
+    this.lines = 4;
   }
 
   done(summary: string): void {
-    line();
+    write(`${ESC}2K\n`);
     line(`  ${c.green}✓${c.reset} ${summary}`);
   }
 
   fail(summary: string): void {
-    line();
+    write(`${ESC}2K\n`);
     line(`  ${c.red}✗${c.reset} ${summary}`);
   }
 }
