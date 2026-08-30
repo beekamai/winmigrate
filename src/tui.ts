@@ -495,6 +495,129 @@ async function screenRestore(st: State): Promise<void> {
   await pause();
 }
 
+/**
+ * Incremental refresh: re-pack whatever changed since the last run, then push
+ * only the new blobs. Both halves skip unchanged data, so running this again
+ * shortly before a reinstall costs minutes, not hours.
+ */
+async function screenSync(st: State): Promise<void> {
+  const dir = await prompt("Какой бэкап обновить:", { def: st.backupDir });
+  if (dir === null) return;
+  st.backupDir = dir;
+  if (!existsSync(join(dir, "manifest.db"))) {
+    line(`\n  ${c.red}Нет бэкапа в ${dir} — сначала создай его.${c.reset}`);
+    await pause();
+    return;
+  }
+
+  // Refresh exactly the profiles this backup already contains.
+  const mfPeek = new Manifest(dir);
+  const known = [...new Set(mfPeek.entries().map((e) => e.profile))];
+  mfPeek.close();
+  if (!known.length) {
+    line(`\n  ${c.red}Бэкап пуст.${c.reset}`);
+    await pause();
+    return;
+  }
+
+  line(`\n  ${c.grey}профили в этом бэкапе: ${known.join(", ")}${c.reset}`);
+  if (!(await checkRunningApps(known))) return;
+  if (!(await needPassphrase(st, known))) return;
+
+  let release: () => void;
+  try {
+    release = acquire(dir);
+  } catch (e) {
+    line(`\n  ${c.red}${(e as Error).message}${c.reset}`);
+    await pause();
+    return;
+  }
+
+  title("Обновление бэкапа", "добавляю только новое и изменившееся · Esc — прервать");
+  line();
+
+  const machine = await detectMachine();
+  const mf = new Manifest(dir);
+  mf.saveMachine(machine);
+  try {
+    const raw = await Bun.file(`${machine.home}\\.claude.json`).text();
+    mf.setMeta("projectMap", JSON.stringify(buildProjectMap(JSON.parse(raw), (abs) => toPortable(abs, machine))));
+  } catch { /* no Claude config */ }
+
+  const scanned = await cancellable(async (signal) => {
+    let all: ScannedFile[] = [];
+    for (const n of known) {
+      const p = profileByName(n);
+      if (!p) continue;
+      const sp = new Spinner(`сканирую ${n}`);
+      const files = await scanProfileAsync(p, {
+        signal,
+        onProgress: (found, current) => sp.tick(`${found} файлов · ${current}`),
+      });
+      sp.clear();
+      all = all.concat(files);
+    }
+    return all;
+  });
+  if (scanned.cancelled || !scanned.value) {
+    line(`  ${c.yellow}прервано${c.reset}`);
+    mf.close(); release(); await pause();
+    return;
+  }
+
+  const before = mf.entries().length;
+  const bar = new Progress(`Проверяю ${scanned.value.length} файлов  ${c.grey}(Esc — прервать)${c.reset}`);
+  const packRun = await cancellable((signal) =>
+    packAll(scanned.value!, mf, machine, {
+      concurrency: Math.min(16, navigator.hardwareConcurrency ?? 8),
+      passphrase: st.passphrase ?? undefined,
+      dryRun: false,
+      signal,
+      onProgress: (done, total, bytes) => bar.render(done, total, bytes),
+    }),
+  );
+  const after = mf.entries().length;
+  const store = mf.storeStats();
+  mf.close();
+  release();
+
+  if (!packRun.value || packRun.value.aborted) {
+    bar.fail("прервано — прогресс сохранён");
+    await pause();
+    return;
+  }
+  bar.done(`новых записей: ${after - before} · в хранилище ${humanBytes(store.stored)}`);
+
+  const cfg = r2.loadConfig();
+  if (!cfg) {
+    line(`  ${c.grey}R2 не настроен — заливка пропущена${c.reset}`);
+    await pause();
+    return;
+  }
+
+  line();
+  const prep = new Spinner("подготовка");
+  const upBar = new Progress(`Догружаю в R2  ${c.grey}(Esc — остановить)${c.reset}`);
+  let started = false;
+  const up = await cancellable((signal) =>
+    r2.upload(dir, cfg, {
+      signal,
+      concurrency: st.uploadConcurrency,
+      onProgress: (p) => {
+        if (p.phase === "transfer") {
+          if (!started) { prep.clear(); started = true; }
+          upBar.render(p.done, p.total, p.bytes, p.current);
+        } else prep.tick(p.current);
+      },
+    }),
+  );
+  if (!started) prep.clear();
+  const ur = up.value;
+  if (!ur || up.cancelled || ur.aborted) upBar.fail("заливка остановлена — повтори позже");
+  else upBar.done(`отправлено ${ur.uploaded} · пропущено ${ur.skipped} · ${humanBytes(ur.bytes)}`);
+  await pause();
+}
+
 async function screenVerify(st: State): Promise<void> {
   const dir = await prompt("Какой бэкап проверить:", { def: st.backupDir });
   if (dir === null) return;
@@ -568,6 +691,7 @@ export async function runTui(): Promise<void> {
       [
         { label: "Обзор", hint: "что и сколько попадёт в бэкап", value: "overview" },
         { label: "Создать бэкап", hint: "собрать, сжать, зашифровать секреты", value: "backup" },
+        { label: "Обновить и залить", hint: "добавить новое и изменившееся, догрузить в R2", value: "sync" },
         { label: "Залить в R2", hint: "отправить бэкап в облако", value: "upload" },
         { label: "Скачать из R2", hint: "забрать бэкап на новой машине", value: "download" },
         { label: "Восстановить", hint: "разложить по местам с переназначением путей", value: "restore" },
@@ -583,6 +707,7 @@ export async function runTui(): Promise<void> {
     switch (choice) {
       case "overview": await screenOverview(st); break;
       case "backup": await screenBackup(st); break;
+      case "sync": await screenSync(st); break;
       case "upload": await screenUpload(st); break;
       case "download": await screenDownload(st); break;
       case "restore": await screenRestore(st); break;
