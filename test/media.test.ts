@@ -84,7 +84,8 @@ describe("explaining a single file's fate", () => {
   });
 
   test("a library icon is rejected by the size floor, and says so", () => {
-    const r = explain(join(SRC, "iconly-glass-shield.svg"), rule, 9.5 * 1024);
+    // Correct extension, wrong size — this must fail on the floor, not the type.
+    const r = explain(join(SRC, "iconly-glass-shield.png"), rule, 9.5 * 1024);
     expect(r.included).toBe(false);
     expect(r.reason).toContain("порога");
   });
