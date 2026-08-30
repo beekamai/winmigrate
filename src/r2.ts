@@ -264,6 +264,50 @@ function checkpoint(backupDir: string): void {
   }
 }
 
+export interface RemoteCheck {
+  localFiles: number;
+  remoteObjects: number;
+  missing: { rel: string; size: number }[];
+  sizeMismatch: { rel: string; local: number; remote: number }[];
+  extra: string[];
+}
+
+/**
+ * Compares the local backup against the bucket. An interrupted upload is safe
+ * — object writes are atomic, so a key is either absent or complete — but this
+ * proves it rather than assuming it.
+ */
+export async function verifyRemote(
+  backupDir: string,
+  c: R2Config,
+  opts: SyncOptions = {},
+): Promise<RemoteCheck> {
+  const client = makeClient(c);
+  const files = await backupFiles(backupDir, opts);
+  const remote = await remoteIndex(client, c.prefix, opts);
+
+  const missing: RemoteCheck["missing"] = [];
+  const sizeMismatch: RemoteCheck["sizeMismatch"] = [];
+  const seen = new Set<string>();
+
+  for (const f of files) {
+    const key = `${c.prefix}/${f.rel}`;
+    seen.add(key);
+    const size = remote.get(key);
+    if (size === undefined) missing.push({ rel: f.rel, size: f.size });
+    else if (size !== f.size) sizeMismatch.push({ rel: f.rel, local: f.size, remote: size });
+  }
+
+  const extra = [...remote.keys()].filter((k) => !seen.has(k));
+  return {
+    localFiles: files.length,
+    remoteObjects: remote.size,
+    missing,
+    sizeMismatch,
+    extra,
+  };
+}
+
 export async function testConnection(c: R2Config): Promise<{ ok: boolean; detail: string }> {
   try {
     const client = makeClient(c);

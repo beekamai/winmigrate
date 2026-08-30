@@ -331,6 +331,7 @@ Commands:
   tui           Interactive menu (default when no command is given)
   r2-upload     Push a backup directory to Cloudflare R2
   r2-download   Pull a backup from Cloudflare R2 into -o DIR
+  r2-verify     Compare the local backup against the bucket (what is missing)
   plan       Show what would be collected, write nothing
   backup     Collect, dedupe, compress into a backup directory
   restore    Materialise a backup onto this machine, remapping paths
@@ -388,6 +389,30 @@ try {
     case "tui": {
       const { runTui } = await import("./tui.ts");
       await runTui();
+      break;
+    }
+    case "r2-verify": {
+      const r2 = await import("./r2.ts");
+      const cfg = r2.loadConfig();
+      if (!cfg) { console.error("R2 не настроен."); process.exit(2); }
+      process.stdout.write("сверяю локальный бэкап с бакетом...\n");
+      const r = await r2.verifyRemote(a.out, cfg, {
+        onProgress: (p) => process.stdout.write(`\r  ${p.current}                    `),
+      });
+      process.stdout.write("\n\n");
+      console.log(`локальных файлов: ${r.localFiles}`);
+      console.log(`объектов в облаке: ${r.remoteObjects}`);
+      console.log(`не залито:        ${r.missing.length}`);
+      console.log(`размер не совпал: ${r.sizeMismatch.length}`);
+      console.log(`лишнее в облаке:  ${r.extra.length}`);
+      for (const m of r.sizeMismatch.slice(0, 10)) {
+        console.log(`  ! ${m.rel}: локально ${m.local}, в облаке ${m.remote}`);
+      }
+      if (!r.missing.length && !r.sizeMismatch.length) {
+        console.log("\nВ облаке лежит полная копия бэкапа.");
+      } else {
+        console.log("\nЗапусти r2-upload — дошлёт недостающее.");
+      }
       break;
     }
     case "r2-upload": await cmdR2(a, "up"); break;
