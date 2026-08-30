@@ -49,19 +49,57 @@ export function humanBytes(n: number): string {
   return `${v.toFixed(v >= 100 || i === 0 ? 0 : 1)} ${u[i]}`;
 }
 
-type Key = { name: string; ctrl: boolean };
+export type Key = { name: string; ctrl: boolean; text?: string };
 
-function decode(buf: string): Key {
+/** Strips bracketed-paste markers and control characters from pasted text. */
+export function sanitizePaste(s: string): string {
+  return s
+    .replace(/\x1b\[20[01]~/g, "")
+    // A multi-line paste into a single-line prompt takes the first line.
+    .split(/\r?\n/)[0]!
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\x00-\x08\x0b-\x1f\x7f]/g, "");
+}
+
+export function decode(buf: string): Key {
+  // Bracketed paste must be checked first: it starts with an escape sequence,
+  // so the arrow-key branch below would otherwise swallow it.
+  if (buf.includes("\x1b[200~")) {
+    const text = sanitizePaste(buf);
+    return text ? { name: "paste", ctrl: false, text } : { name: "noop", ctrl: false };
+  }
+  if (buf === "\x1b[201~") return { name: "noop", ctrl: false };
+
   if (buf === "\x03") return { name: "ctrl-c", ctrl: true };
   if (buf === "\r" || buf === "\n") return { name: "enter", ctrl: false };
   if (buf === " ") return { name: "space", ctrl: false };
   if (buf === "\x1b") return { name: "escape", ctrl: false };
   if (buf === "\x7f" || buf === "\b") return { name: "backspace", ctrl: false };
+  if (buf === "\x16") return { name: "ctrl-v", ctrl: true };
   if (buf === "\x1b[A") return { name: "up", ctrl: false };
   if (buf === "\x1b[B") return { name: "down", ctrl: false };
   if (buf === "\x1b[C") return { name: "right", ctrl: false };
   if (buf === "\x1b[D") return { name: "left", ctrl: false };
+
+  // Anything longer than one character that is not a known escape sequence is a
+  // paste: right-click and Ctrl+V both arrive as a single bulk chunk.
+  if (buf.length > 1 && !buf.startsWith("\x1b[")) {
+    const text = sanitizePaste(buf);
+    if (text) return { name: "paste", ctrl: false, text };
+  }
   return { name: buf, ctrl: false };
+}
+
+/** Fallback for terminals that send ^V instead of the clipboard contents. */
+async function readClipboard(): Promise<string> {
+  try {
+    const out = await Bun.$`powershell -NoProfile -NonInteractive -Command Get-Clipboard -Raw`
+      .quiet()
+      .text();
+    return sanitizePaste(out);
+  } catch {
+    return "";
+  }
 }
 
 async function readKey(): Promise<Key> {
@@ -163,15 +201,25 @@ export async function multiSelect(items: CheckItem[], heading: string, sub?: str
 export async function prompt(question: string, opts: { mask?: boolean; def?: string } = {}): Promise<string | null> {
   let value = "";
   showCursor();
-  for (;;) {
-    const shown = opts.mask ? "•".repeat(value.length) : value;
-    const def = opts.def && !value ? `${c.grey}(${opts.def})${c.reset} ` : "";
-    write(`\r${ESC}2K  ${c.cyan}?${c.reset} ${question} ${def}${shown}`);
-    const k = await readKey();
-    if (k.name === "ctrl-c" || k.name === "escape") { line(); return null; }
-    if (k.name === "enter") { line(); return value || opts.def || ""; }
-    if (k.name === "backspace") value = value.slice(0, -1);
-    else if (k.name.length === 1 && k.name >= " ") value += k.name;
+  // Ask the terminal to wrap pastes in markers so they arrive as one chunk.
+  write(`${ESC}?2004h`);
+  try {
+    for (;;) {
+      const shown = opts.mask ? "•".repeat(value.length) : value;
+      const def = opts.def && !value ? `${c.grey}(${opts.def})${c.reset} ` : "";
+      const hint = value ? "" : `  ${c.grey}(вставка: ПКМ или Ctrl+V)${c.reset}`;
+      write(`\r${ESC}2K  ${c.cyan}?${c.reset} ${question} ${def}${shown}${hint}`);
+      const k = await readKey();
+      if (k.name === "ctrl-c" || k.name === "escape") { line(); return null; }
+      if (k.name === "enter") { line(); return value || opts.def || ""; }
+      if (k.name === "backspace") { value = value.slice(0, -1); continue; }
+      if (k.name === "paste" && k.text) { value += k.text; continue; }
+      if (k.name === "ctrl-v") { value += await readClipboard(); continue; }
+      // Printable single character.
+      if (k.name.length === 1 && k.name >= " ") value += k.name;
+    }
+  } finally {
+    write(`${ESC}?2004l`);
   }
 }
 
