@@ -76,6 +76,8 @@ export class Manifest {
     this.db = new Database(join(root, "manifest.db"), { create: true });
     this.db.exec("PRAGMA journal_mode = WAL;");
     this.db.exec("PRAGMA synchronous = NORMAL;");
+    // Wait instead of failing when another writer holds the database briefly.
+    this.db.exec("PRAGMA busy_timeout = 15000;");
     this.db.exec(SCHEMA);
   }
 
@@ -136,6 +138,13 @@ export class Manifest {
            hash=excluded.hash, encrypted=excluded.encrypted, rewrite=excluded.rewrite`,
       )
       .run(e.profile, e.portable, e.source, e.size, e.mtime, e.hash, e.encrypted, e.rewrite);
+  }
+
+  /** Used to resume a backup: an unchanged file need not be read again. */
+  getEntry(profile: string, portable: string): EntryRow | null {
+    return this.db
+      .query<EntryRow, [string, string]>("SELECT * FROM entries WHERE profile=? AND portable=?")
+      .get(profile, portable);
   }
 
   entries(profiles?: string[]): EntryRow[] {

@@ -73,6 +73,15 @@ function sizeAllowed(size: number, rule: Rule): boolean {
   return true;
 }
 
+/**
+ * A git object store must be taken whole: dropping a single packfile (they run
+ * to hundreds of MB) leaves a repository that cannot be checked out. Size and
+ * extension filters therefore never apply inside .git.
+ */
+export function insideGitDir(rel: string): boolean {
+  return /(^|[\\/])\.git([\\/]|$)/i.test(rel);
+}
+
 function includeAllowed(rel: string, includeOnly?: string[]): boolean {
   if (!includeOnly?.length) return true;
   const first = segments(rel)[0]?.toLowerCase() ?? "";
@@ -108,12 +117,13 @@ function walk(root: string, rule: Rule, profile: string, out: ScannedFile[]): vo
         walk(abs, rule, profile, out);
       } else if (ent.isFile()) {
         try {
-          if (!extAllowed(ent.name, rule.excludeExt, rule.includeExt)) {
+          const inGit = insideGitDir(rel);
+          if (!inGit && !extAllowed(ent.name, rule.excludeExt, rule.includeExt)) {
             ent = dir.readSync();
             continue;
           }
           const st = statSync(abs);
-          if (sizeAllowed(st.size, rule)) {
+          if (inGit || sizeAllowed(st.size, rule)) {
             out.push({ abs, size: st.size, mtime: Math.floor(st.mtimeMs), rule, profile });
           }
         } catch {
@@ -140,6 +150,7 @@ export function explain(abs: string, rule: Rule, size: number): { included: bool
   const rel = abs.slice(rule.path.length).replace(/^[\\/]/, "");
   if (excluded(rel, rule.exclude ?? [])) return { included: false, reason: "исключено правилом exclude" };
   if (!includeAllowed(rel, rule.includeOnly)) return { included: false, reason: "не входит в includeOnly" };
+  if (insideGitDir(rel)) return { included: true, reason: "внутри .git — фильтры не применяются" };
 
   const dot = abs.lastIndexOf(".");
   const ext = dot < 0 ? "" : abs.slice(dot).toLowerCase();

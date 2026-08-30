@@ -20,6 +20,8 @@ export interface PackOptions {
   concurrency: number;
   passphrase?: string;
   dryRun: boolean;
+  /** Re-pack everything even if the manifest already has an identical entry. */
+  force?: boolean;
   onProgress?: (done: number, total: number, bytes: number) => void;
 }
 
@@ -60,6 +62,17 @@ async function packOne(
     ? normalizeSep(f.rule.relocateTo) + normalizeSep(f.abs).slice(normalizeSep(f.rule.path).length)
     : toPortable(f.abs, machine);
   const secret = f.rule.secret === true;
+
+  // Resume support: an entry with the same size and mtime whose blob is still
+  // present is already backed up. Skipping avoids re-reading the file at all,
+  // which is what makes an interrupted backup cheap to continue.
+  if (!opts.force && !opts.dryRun) {
+    const prev = mf.getEntry(f.profile, portable);
+    if (prev && prev.size === f.size && prev.mtime === f.mtime) {
+      if (await Bun.file(mf.blobPath(prev.hash)).exists()) return f.size;
+    }
+  }
+
   const streaming = f.size >= STREAM_THRESHOLD;
 
   let hash: string;
@@ -142,15 +155,27 @@ export async function packAll(
   mf: Manifest,
   machine: MachineProfile,
   opts: PackOptions,
-): Promise<{ files: number; bytes: number; errors: string[] }> {
+): Promise<{ files: number; bytes: number; errors: string[]; aborted: boolean }> {
   const errors: string[] = [];
   let done = 0;
   let bytes = 0;
   let cursor = 0;
+  let aborted = false;
+
+  // Ctrl+C stops cleanly: workers finish the file in flight, the manifest is
+  // left consistent, and a later run resumes from what is already stored.
+  const onSigint = () => {
+    if (!aborted) {
+      aborted = true;
+      process.stdout.write("\n  прерывание — доканчиваю текущие файлы, прогресс сохраняется…\n");
+    }
+  };
+  process.on("SIGINT", onSigint);
 
   // Writes go through one SQLite connection, so transactions batch by worker turn.
   const worker = async () => {
     for (;;) {
+      if (aborted) return;
       const i = cursor++;
       if (i >= files.length) return;
       const f = files[i]!;
@@ -167,9 +192,13 @@ export async function packAll(
     }
   };
 
-  await Promise.all(Array.from({ length: Math.max(1, opts.concurrency) }, worker));
+  try {
+    await Promise.all(Array.from({ length: Math.max(1, opts.concurrency) }, worker));
+  } finally {
+    process.off("SIGINT", onSigint);
+  }
   opts.onProgress?.(done, files.length, bytes);
-  return { files: done, bytes, errors };
+  return { files: done, bytes, errors, aborted };
 }
 
 export { humanBytes };

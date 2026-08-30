@@ -109,6 +109,37 @@ describe("explaining a single file's fate", () => {
   });
 });
 
+describe("git repositories survive the code profile's filters", () => {
+  // Without this, a 245 MB packfile is dropped and the restored repo is broken.
+  const codeRule = {
+    path: "D:\\CodeWorks",
+    maxFileSize: 25 * 1024 * 1024,
+    excludeExt: [".exe", ".dll", ".pack"],
+  };
+
+  test("an oversized packfile is still collected", () => {
+    const r = explain("D:\\CodeWorks\\app\\.git\\objects\\pack\\pack-abc.pack", codeRule, 245 * 1024 * 1024);
+    expect(r.included).toBe(true);
+    expect(r.reason).toContain(".git");
+  });
+
+  test("a loose object above the limit is still collected", () => {
+    const r = explain("D:\\CodeWorks\\app\\.git\\objects\\bd\\aafe95222056", codeRule, 40 * 1024 * 1024);
+    expect(r.included).toBe(true);
+  });
+
+  test("the same size limit still applies outside .git", () => {
+    const r = explain("D:\\CodeWorks\\app\\usage.db", codeRule, 2.8 * 1024 * 1024 * 1024);
+    expect(r.included).toBe(false);
+    expect(r.reason).toContain("лимита");
+  });
+
+  test("a folder merely named gitsomething is not treated as a git store", () => {
+    const r = explain("D:\\CodeWorks\\gitignore-docs\\huge.exe", codeRule, 90 * 1024 * 1024);
+    expect(r.included).toBe(false);
+  });
+});
+
 describe("gathering into one review folder", () => {
   let machine: MachineProfile;
 

@@ -6,6 +6,7 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { Manifest } from "./manifest.ts";
+import { acquire } from "./lock.ts";
 import { detectMachine, parseRelocation, toPortable, type Relocation, type VolumeMap } from "./portable.ts";
 import { PROFILES, profileByName } from "./profiles.ts";
 import { scanProfile, type ScannedFile } from "./scan.ts";
@@ -93,6 +94,14 @@ async function screenBackup(st: State): Promise<void> {
   line(`  ${c.grey}сканирую файлы…${c.reset}\n`);
 
   const machine = await detectMachine();
+  let release: () => void;
+  try {
+    release = acquire(st.backupDir);
+  } catch (e) {
+    line(`\n  ${c.red}${(e as Error).message}${c.reset}`);
+    await pause();
+    return;
+  }
   const mf = new Manifest(st.backupDir);
   mf.saveMachine(machine);
 
@@ -117,15 +126,21 @@ async function screenBackup(st: State): Promise<void> {
   });
 
   const store = mf.storeStats();
-  bar.done(
-    `${res.files} файлов · ${humanBytes(res.bytes)} → ${humanBytes(store.stored)} ` +
-    `(сэкономлено ${humanBytes(Math.max(0, res.bytes - store.stored))})`,
-  );
+  if (res.aborted) {
+    bar.fail(`прервано на ${res.files} из ${all.length} — прогресс сохранён`);
+    line(`  ${c.grey}запусти бэкап снова в ту же папку: продолжит с этого места${c.reset}`);
+  } else {
+    bar.done(
+      `${res.files} файлов · ${humanBytes(res.bytes)} → ${humanBytes(store.stored)} ` +
+      `(сэкономлено ${humanBytes(Math.max(0, res.bytes - store.stored))})`,
+    );
+  }
   if (res.errors.length) {
     line(`  ${c.yellow}!${c.reset} ошибок: ${res.errors.length} (первые 3):`);
     for (const e of res.errors.slice(0, 3)) line(`    ${c.grey}${e}${c.reset}`);
   }
   mf.close();
+  release();
   await pause();
 }
 

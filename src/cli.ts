@@ -6,6 +6,7 @@
 */
 
 import { Manifest } from "./manifest.ts";
+import { acquire } from "./lock.ts";
 import { detectMachine, parseRelocation, toPortable, type Relocation, type VolumeMap } from "./portable.ts";
 import { PROFILES, allProfileNames, profileByName } from "./profiles.ts";
 import { humanBytes, scanProfile, type ScannedFile } from "./scan.ts";
@@ -120,6 +121,7 @@ async function cmdBackup(a: Args): Promise<void> {
     process.exit(2);
   }
 
+  const release = acquire(a.out);
   const mf = new Manifest(a.out);
   mf.saveMachine(machine);
 
@@ -170,8 +172,12 @@ async function cmdBackup(a: Args): Promise<void> {
     console.log(`\n${res.errors.length} errors (first 10):`);
     for (const e of res.errors.slice(0, 10)) console.log("  " + e);
   }
+  if (res.aborted) {
+    console.log(`\nПрервано. Прогресс сохранён — запусти ту же команду, продолжит с этого места.`);
+  }
   console.log(`\nBackup at: ${a.out}${a.dryRun ? "  (dry run — no blobs written)" : ""}`);
   mf.close();
+  release();
 }
 
 async function cmdRestore(a: Args): Promise<void> {
