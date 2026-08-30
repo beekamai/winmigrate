@@ -7,7 +7,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { scanProfile } from "../src/scan.ts";
+import { explain, scanProfile } from "../src/scan.ts";
 import { Manifest } from "../src/manifest.ts";
 import { packAll } from "../src/pack.ts";
 import { detectMachine, type MachineProfile } from "../src/portable.ts";
@@ -72,6 +72,39 @@ describe("selection", () => {
     const exts = scanProfile(profile).map((f) => f.abs.slice(f.abs.lastIndexOf(".")));
     expect(exts).not.toContain(".txt");
     expect(exts).not.toContain(".zip");
+  });
+});
+
+describe("explaining a single file's fate", () => {
+  const rule = profile.rules[0]!;
+
+  test("a real artwork is accepted with its reason", () => {
+    const r = explain(join(SRC, "marci_logo.png"), rule, 2.2 * 1024 * 1024);
+    expect(r.included).toBe(true);
+  });
+
+  test("a library icon is rejected by the size floor, and says so", () => {
+    const r = explain(join(SRC, "iconly-glass-shield.svg"), rule, 9.5 * 1024);
+    expect(r.included).toBe(false);
+    expect(r.reason).toContain("порога");
+  });
+
+  test("a wrong extension is rejected naming the extension", () => {
+    const r = explain(join(SRC, "installer.exe"), rule, 5 * 1024 * 1024);
+    expect(r.included).toBe(false);
+    expect(r.reason).toContain(".exe");
+  });
+
+  test("a file outside the rule's root is reported as out of scope", () => {
+    const r = explain("C:\\Elsewhere\\photo.jpg", rule, 500 * 1024);
+    expect(r.included).toBe(false);
+    expect(r.reason).toBe("вне области правила");
+  });
+
+  test("a chat-export attachment is rejected even though it is a real photo", () => {
+    const r = explain(join(SRC, "DataExport_2024-08-27", "chat", "a.jpg"), rule, 600 * 1024);
+    expect(r.included).toBe(false);
+    expect(r.reason).toContain("exclude");
   });
 });
 

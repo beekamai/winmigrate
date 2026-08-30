@@ -127,6 +127,35 @@ function walk(root: string, rule: Rule, profile: string, out: ScannedFile[]): vo
   }
 }
 
+/**
+ * Explains whether one concrete file would be collected by a rule, and why not.
+ * Used by the `check` command so a decision can be verified without a full scan.
+ */
+export function explain(abs: string, rule: Rule, size: number): { included: boolean; reason: string } {
+  const root = rule.path.replace(/[\\/]+$/, "").toLowerCase();
+  const file = abs.toLowerCase();
+  if (file !== root && !file.startsWith(root + "\\")) {
+    return { included: false, reason: "вне области правила" };
+  }
+  const rel = abs.slice(rule.path.length).replace(/^[\\/]/, "");
+  if (excluded(rel, rule.exclude ?? [])) return { included: false, reason: "исключено правилом exclude" };
+  if (!includeAllowed(rel, rule.includeOnly)) return { included: false, reason: "не входит в includeOnly" };
+
+  const dot = abs.lastIndexOf(".");
+  const ext = dot < 0 ? "" : abs.slice(dot).toLowerCase();
+  if (rule.includeExt?.length && !rule.includeExt.includes(ext)) {
+    return { included: false, reason: `расширение ${ext || "(нет)"} не в includeExt` };
+  }
+  if (rule.excludeExt?.includes(ext)) return { included: false, reason: `расширение ${ext} в excludeExt` };
+  if (rule.minFileSize !== undefined && size < rule.minFileSize) {
+    return { included: false, reason: `меньше порога ${Math.round(rule.minFileSize / 1024)} KB` };
+  }
+  if (rule.maxFileSize !== undefined && size > rule.maxFileSize) {
+    return { included: false, reason: `больше лимита ${Math.round(rule.maxFileSize / 1024 / 1024)} MB` };
+  }
+  return { included: true, reason: "подходит" };
+}
+
 export function scanProfile(p: Profile): ScannedFile[] {
   const out: ScannedFile[] = [];
   for (const rule of p.rules) {

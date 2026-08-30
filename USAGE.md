@@ -170,6 +170,10 @@ bun run src/cli.ts restore -p code,claude --from D:\wm-backup `
 ## Диагностика
 
 ```powershell
+# Попадёт ли конкретный файл в бэкап, в какой профиль и куда он ляжет
+bun run tools/check.ts "C:\Users\Jaros\Downloads\marci_logo.png"
+bun run tools/check.ts --dir "C:\Users\Jaros\Downloads"
+
 bun run tools/top.ts code 2      # где именно вес профиля: по подпапкам и расширениям
 bun test                         # 25 тестов на перенос путей и шифрование
 bunx tsc --noEmit                # типы
