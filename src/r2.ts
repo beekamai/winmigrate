@@ -385,6 +385,49 @@ export async function verifyRemote(
   };
 }
 
+/**
+ * Deletes objects that the local backup no longer contains. Run after `prune`,
+ * otherwise data dropped locally keeps costing storage in the bucket.
+ */
+export async function pruneRemote(
+  backupDir: string,
+  c: R2Config,
+  apply: boolean,
+  opts: SyncOptions = {},
+): Promise<{ extra: string[]; deleted: number; freedApprox: number }> {
+  const client = makeClient(c);
+  const files = await backupFiles(backupDir, opts);
+  const local = new Set(files.map((f) => `${c.prefix}/${f.rel}`));
+  const remote = await remoteIndex(client, c.prefix, opts);
+
+  const extra: string[] = [];
+  let freedApprox = 0;
+  for (const [key, size] of remote) {
+    // The bucket may show a prefix placeholder; never treat it as a stray file.
+    if (key.endsWith("/")) continue;
+    if (!local.has(key)) {
+      extra.push(key);
+      freedApprox += size;
+    }
+  }
+
+  let deleted = 0;
+  if (apply && extra.length) {
+    await pool(extra, 32, () => 0, async (key) => {
+      if (opts.signal?.aborted) return;
+      try {
+        await client.file(key).delete();
+        deleted++;
+        opts.onProgress?.({
+          done: deleted, total: extra.length, bytes: 0, totalBytes: 0,
+          current: key, skipped: 0, phase: "transfer",
+        });
+      } catch { /* already gone */ }
+    }, opts.signal);
+  }
+  return { extra, deleted, freedApprox };
+}
+
 export async function testConnection(c: R2Config): Promise<{ ok: boolean; detail: string }> {
   try {
     const client = makeClient(c);

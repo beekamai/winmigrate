@@ -18,6 +18,13 @@ import { humanBytes } from "../src/scan.ts";
 const backupDir = process.argv[2] ?? "D:\\wm-backup";
 const sampleSize = Number(process.argv[3] ?? 40);
 
+/**
+ * Hard ceiling per object. Bun's S3 stream buffers aggressively, so auditing a
+ * 4 GB blob pulled gigabytes into RAM and starved the machine. Multipart
+ * behaviour is already exercised by objects in the tens of megabytes.
+ */
+const MAX_AUDIT_BYTES = 48 * 1024 * 1024;
+
 const cfg = r2.loadConfig();
 if (!cfg) { console.log("R2 не настроен"); process.exit(1); }
 
@@ -34,12 +41,17 @@ do {
 
 console.log(`объектов в облаке: ${objects.length}`);
 
-const bySize = [...objects].sort((a, b) => b.size - a.size);
+const auditable = objects.filter((o) => o.size <= MAX_AUDIT_BYTES);
+const tooBig = objects.length - auditable.length;
+
+// Largest auditable objects (these still went through multipart) plus a random tail.
+const bySize = [...auditable].sort((a, b) => b.size - a.size);
 const big = bySize.slice(0, Math.ceil(sampleSize / 2));
 const random = bySize.slice(Math.ceil(sampleSize / 2)).sort(() => Math.random() - 0.5).slice(0, Math.floor(sampleSize / 2));
 const sample = [...big, ...random];
 
-console.log(`проверяю ${sample.length} объектов против локальных файлов\n`);
+console.log(`проверяю ${sample.length} объектов против локальных файлов`);
+console.log(`(пропущено ${tooBig} объектов крупнее ${humanBytes(MAX_AUDIT_BYTES)} — чтобы не занимать память)\n`);
 
 async function sha256Stream(it: AsyncIterable<Uint8Array>): Promise<string> {
   const h = createHash("sha256");

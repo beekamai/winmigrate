@@ -209,10 +209,16 @@ export const PROFILES: Profile[] = [
       // tdata is the Telegram session; user_data/*cache* is just downloaded media.
       {
         path: "D:\\Telegram Desktop\\tdata",
-        exclude: ["user_data/cache", "user_data/media_cache", "user_data#2/cache", "user_data#2/media_cache", "emoji", "dumps"],
+        // Match by segment name: accounts live in user_data, user_data#2,
+        // user_data#3 … and a path-prefix list silently missed the numbered ones.
+        exclude: ["cache", "media_cache", "emoji", "dumps", "Code Cache", "GPUCache", "EBWebView"],
         secret: true,
       },
-      { path: `${ROAMING}\\Telegram Desktop\\tdata`, exclude: ["user_data/cache", "user_data/media_cache"], secret: true },
+      {
+        path: `${ROAMING}\\Telegram Desktop\\tdata`,
+        exclude: ["cache", "media_cache", "emoji", "dumps", "Code Cache", "GPUCache", "EBWebView"],
+        secret: true,
+      },
       { path: `${ROAMING}\\discord`, includeOnly: ["settings.json", "Local Storage", "Local State"], secret: true },
       { path: `${ROAMING}\\Element`, includeOnly: ["IndexedDB", "Local Storage", "EventStore", "config.json"], secret: true },
       { path: `${LOCAL}\\element-desktop`, includeOnly: ["IndexedDB", "Local Storage", "EventStore"], secret: true },

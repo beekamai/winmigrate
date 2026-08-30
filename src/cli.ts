@@ -332,6 +332,7 @@ Commands:
   r2-upload     Push a backup directory to Cloudflare R2
   r2-download   Pull a backup from Cloudflare R2 into -o DIR
   r2-verify     Compare the local backup against the bucket (what is missing)
+  r2-prune      Delete bucket objects the local backup no longer has (-n first)
   plan       Show what would be collected, write nothing
   backup     Collect, dedupe, compress into a backup directory
   restore    Materialise a backup onto this machine, remapping paths
@@ -413,6 +414,22 @@ try {
       } else {
         console.log("\nЗапусти r2-upload — дошлёт недостающее.");
       }
+      break;
+    }
+    case "r2-prune": {
+      const r2 = await import("./r2.ts");
+      const cfg = r2.loadConfig();
+      if (!cfg) { console.error("R2 не настроен."); process.exit(2); }
+      const apply = !a.dryRun;
+      console.log(`Ищу в бакете объекты, которых нет в ${a.out}...\n`);
+      const r = await r2.pruneRemote(a.out, cfg, apply, {
+        onProgress: (p) => process.stdout.write(`\r  ${p.current}                              `),
+      });
+      process.stdout.write("\n\n");
+      console.log(`лишних объектов: ${r.extra.length} · примерно ${humanBytes(r.freedApprox)}`);
+      for (const e of r.extra.slice(0, 10)) console.log(`  ${e}`);
+      if (r.extra.length > 10) console.log(`  … и ещё ${r.extra.length - 10}`);
+      console.log(apply ? `\nудалено: ${r.deleted}` : "\nНичего не удалено (-n). Убери -n, чтобы применить.");
       break;
     }
     case "r2-upload": await cmdR2(a, "up"); break;
