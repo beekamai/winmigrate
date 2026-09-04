@@ -57,6 +57,7 @@ export async function detectVolumes(): Promise<VolumeInfo[]> {
   const out = await $`powershell -NoProfile -NonInteractive -Command ${ps}`.text();
   const parsed = JSON.parse(out.trim() || "[]");
   const list: RawVolume[] = Array.isArray(parsed) ? parsed : [parsed];
+  const systemLetter = (process.env.SystemDrive ?? "C:").slice(0, 1).toUpperCase();
 
   return list
     .filter((v) => v.DriveLetter)
@@ -69,7 +70,9 @@ export async function detectVolumes(): Promise<VolumeInfo[]> {
         label,
         letter,
         sizeBytes: v.Size ?? 0,
-        role: label || (letter === "C" ? "SYSTEM" : `DISK_${letter}`),
+        // The Windows volume is SYSTEM whatever an installer labels it: a fresh
+        // install must resolve {{VOL:SYSTEM}} without being asked.
+        role: letter === systemLetter ? "SYSTEM" : label || `DISK_${letter}`,
       } satisfies VolumeInfo;
     });
 }

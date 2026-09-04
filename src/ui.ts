@@ -126,6 +126,16 @@ class Keyboard {
     });
   }
 
+  stop(): void {
+    if (!this.started) return;
+    this.started = false;
+    this.subs.clear();
+    const stdin = process.stdin;
+    if (stdin.isTTY) stdin.setRawMode(false);
+    stdin.removeAllListeners("data");
+    stdin.pause();
+  }
+
   subscribe(fn: (k: Key) => void): () => void {
     this.start();
     this.subs.add(fn);
@@ -146,6 +156,11 @@ const keyboard = new Keyboard();
 
 async function readKey(): Promise<Key> {
   return keyboard.next();
+}
+
+/** Releases the terminal; without this the resumed stdin keeps the process alive after quitting. */
+export function closeInput(): void {
+  keyboard.stop();
 }
 
 export interface MenuItem {

@@ -79,6 +79,16 @@ to raw when it saves less than 5%.
 (`src/crypto.ts`). Because each file gets a random salt and IV, ciphertext is
 never byte-identical and dedup is deliberately skipped for that profile.
 
+**One backup, one passphrase.** Blobs are encrypted per file, so a refresh run
+typed under a mistyped passphrase would silently leave a backup no single
+passphrase can fully open. `src/passphrase.ts` stores a verifier (`passCheck`
+meta: a canary encrypted under the passphrase) and every entry point — TUI
+backup/refresh/restore and CLI `--pass` — checks the typed passphrase against
+it before touching anything. Backups made before the verifier existed are
+checked against their smallest encrypted blob instead. The system volume is
+always role `SYSTEM` regardless of label, so a relabelled `C:` after reinstall
+resolves without a prompt.
+
 **gitsave refuses rather than leaks.** A project is not pushed while any
 secret-bearing file would land in a commit — checked with `git check-ignore`,
 re-checked after `.gitignore` is written and before anything is staged. Losing a

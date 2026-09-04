@@ -122,6 +122,13 @@ export function rewriteText(text: string, ctx: RewriteContext): string {
   let out = text;
   for (const [oldStr, newStr] of replacementPairs(ctx)) {
     if (oldStr === newStr) continue;
+    // The bare username is the one pattern that is not a path: match it only
+    // as a whole word, or "Max" would rewrite every "Maximum" in a config.
+    if (oldStr === ctx.oldUser) {
+      const re = new RegExp(`(?<![A-Za-z0-9_])${oldStr.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![A-Za-z0-9_])`, "g");
+      out = out.replace(re, () => newStr);
+      continue;
+    }
     out = out.replaceAll(oldStr, newStr);
   }
   return out;

@@ -16,6 +16,7 @@ import { restore, verify } from "./restore.ts";
 import { buildProjectMap } from "./rewrite.ts";
 import { discover, inspect, saveProject } from "./gitsave.ts";
 import { detectRunning } from "./apps.ts";
+import { registerPassphrase, verifyPassphrase } from "./passphrase.ts";
 
 interface Args {
   cmd: string;
@@ -71,7 +72,8 @@ function parseArgs(argv: string[]): Args {
     else if (t === "--overwrite") a.overwrite = true;
     else if (t === "--map") {
       const [role, letter] = next().split("=");
-      if (role && letter) a.map[role] = letter;
+      // "E", "E:" and "E:\" all mean the same drive root.
+      if (role && letter) a.map[role] = letter.replace(/[:\\/]+$/, "").toUpperCase() + ":";
     }
   }
   return a;
@@ -113,6 +115,15 @@ async function cmdPlan(a: Args): Promise<void> {
   console.log("\nNothing was written (plan only).");
 }
 
+/** A passphrase that differs from the backup's own is a fatal error, never a warning. */
+async function requirePassphraseMatch(mf: Manifest, pass: string): Promise<void> {
+  if ((await verifyPassphrase(mf, pass)) === "wrong") {
+    console.error("--pass does not match the passphrase this backup is already encrypted with. Aborting.");
+    mf.close();
+    process.exit(2);
+  }
+}
+
 async function cmdBackup(a: Args): Promise<void> {
   const machine = await detectMachine();
   const profiles = selectedProfiles(a.profiles);
@@ -132,6 +143,10 @@ async function cmdBackup(a: Args): Promise<void> {
 
   const release = acquire(a.out);
   const mf = new Manifest(a.out);
+  if (a.pass) {
+    await requirePassphraseMatch(mf, a.pass);
+    registerPassphrase(mf, a.pass);
+  }
   mf.saveMachine(machine);
 
   // Captured now: it is the only reliable source of real project paths,
@@ -192,6 +207,7 @@ async function cmdBackup(a: Args): Promise<void> {
 async function cmdRestore(a: Args): Promise<void> {
   const machine = await detectMachine();
   const mf = new Manifest(a.out);
+  if (a.pass) await requirePassphraseMatch(mf, a.pass);
 
   console.log(`Backup made by user "${mf.getMeta("user")}" at ${mf.getMeta("createdAt")}`);
   console.log(`Restoring as user "${machine.user}"`);

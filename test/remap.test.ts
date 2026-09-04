@@ -233,3 +233,11 @@ describe("secrets encryption", () => {
     expect(() => decrypt(enc, "pw")).toThrow(/Decryption failed/);
   });
 });
+
+describe("username substitution is whole-word only", () => {
+  test("a longer identifier containing the old username is left alone", () => {
+    const c = ctx();
+    const text = 'user=Jaros; author="Jaroslav"; path=C:\\Users\\Jaros\\x; id=Jaros_2';
+    expect(rewriteText(text, c)).toBe('user=mara; author="Jaroslav"; path=C:\\Users\\mara\\x; id=Jaros_2');
+  });
+});

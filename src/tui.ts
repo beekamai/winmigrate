@@ -15,10 +15,11 @@ import { restore, verify } from "./restore.ts";
 import { buildProjectMap } from "./rewrite.ts";
 import { discover, inspect, saveProject } from "./gitsave.ts";
 import { detectRunning } from "./apps.ts";
+import { registerPassphrase, verifyPassphrase } from "./passphrase.ts";
 import * as r2 from "./r2.ts";
 import {
   Progress, Spinner, c, cancellable, confirm, humanBytes, line, menu, multiSelect,
-  pause, prompt, rule, title,
+  closeInput, pause, prompt, rule, title,
 } from "./ui.ts";
 
 const DEFAULT_BACKUP = "D:\\wm-backup";
@@ -26,6 +27,8 @@ const DEFAULT_BACKUP = "D:\\wm-backup";
 interface State {
   backupDir: string;
   passphrase: string | null;
+  /** Backup the cached passphrase was verified against; another dir asks again. */
+  passphraseDir: string | null;
   uploadConcurrency: number;
 }
 
@@ -38,25 +41,52 @@ function profileItems(preselect: string[] = []) {
   }));
 }
 
-async function needPassphrase(st: State, profiles: string[], forRestore = false): Promise<boolean> {
+/**
+ * Asks for the passphrase and proves it is the one the backup in `dir` was
+ * made with before anything is encrypted or decrypted. Only a backup with
+ * nothing encrypted yet falls back to the type-it-twice check.
+ */
+async function needPassphrase(st: State, profiles: string[], dir: string, forRestore = false): Promise<boolean> {
   const needs = profiles.some((n) => profileByName(n)?.rules.some((r) => r.secret));
   if (!needs) return true;
-  if (st.passphrase) return true;
-  const p = await prompt(
-    forRestore ? "Пароль от зашифрованных данных:" : "Пароль для шифрования секретов:",
-    { mask: true },
-  );
-  if (!p) return false;
-  if (!forRestore) {
-    const again = await prompt("Повторите пароль:", { mask: true });
-    if (again !== p) {
-      line(`\n  ${c.red}Пароли не совпадают.${c.reset}`);
-      await pause();
-      return false;
+  if (st.passphrase && st.passphraseDir === dir) return true;
+
+  const mf = existsSync(join(dir, "manifest.db")) ? new Manifest(dir) : null;
+  try {
+    for (;;) {
+      const p = await prompt(
+        forRestore ? "Пароль от зашифрованных данных:" : "Пароль для шифрования секретов:",
+        { mask: true },
+      );
+      if (!p) return false;
+
+      const verdict = mf ? await verifyPassphrase(mf, p) : "unknown";
+      if (verdict === "wrong") {
+        line(`  ${c.red}Не тот пароль: этот бэкап уже зашифрован другим.${c.reset} ${c.grey}(Esc — отмена)${c.reset}`);
+        continue;
+      }
+      if (verdict === "ok") {
+        line(`  ${c.green}✓ пароль совпадает с уже зашифрованными файлами${c.reset}`);
+      } else if (forRestore) {
+        line(`\n  ${c.red}В этом бэкапе нет зашифрованных файлов — проверить пароль не по чему.${c.reset}`);
+        await pause();
+        return false;
+      } else {
+        const again = await prompt("Повторите пароль:", { mask: true });
+        if (again !== p) {
+          line(`\n  ${c.red}Пароли не совпадают.${c.reset}`);
+          await pause();
+          return false;
+        }
+        line(`  ${c.grey}новый бэкап: с этого момента он привязан к этому паролю${c.reset}`);
+      }
+      st.passphrase = p;
+      st.passphraseDir = dir;
+      return true;
     }
+  } finally {
+    mf?.close();
   }
-  st.passphrase = p;
-  return true;
 }
 
 async function screenOverview(st: State): Promise<void> {
@@ -149,7 +179,7 @@ async function screenBackup(st: State): Promise<void> {
   if (dir === null) return;
   st.backupDir = dir;
 
-  if (!(await needPassphrase(st, chosen))) return;
+  if (!(await needPassphrase(st, chosen, st.backupDir))) return;
 
   title("Бэкап", `профили: ${chosen.join(", ")} · Esc — прервать сканирование`);
   line();
@@ -165,6 +195,7 @@ async function screenBackup(st: State): Promise<void> {
   }
   const mf = new Manifest(st.backupDir);
   mf.saveMachine(machine);
+  if (st.passphrase) registerPassphrase(mf, st.passphrase);
 
   try {
     const raw = await Bun.file(`${machine.home}\\.claude.json`).text();
@@ -444,14 +475,25 @@ async function screenRestore(st: State): Promise<void> {
   for (const v of mf.volumes()) {
     const auto = machine.volumes.find((x) => x.role === v.role);
     if (auto) continue;
-    const answer = await prompt(`Том "${v.role}" (был ${v.letter}:) теперь какой диск?`, { def: "D:" });
+    // Same letter as before is the likeliest answer; never guess a different disk.
+    const sameLetter = machine.volumes.find((x) => x.letter === v.letter);
+    const answer = await prompt(
+      `Том "${v.role}" (был ${v.letter}:${v.label ? `, метка "${v.label}"` : ""}) теперь какой диск?`,
+      { def: sameLetter ? `${sameLetter.letter}:` : "" },
+    );
     if (answer === null) { mf.close(); return; }
-    volumeMap[v.role] = answer;
+    const letter = answer.trim().replace(/[:\/]+$/, "").toUpperCase();
+    if (!machine.volumes.some((x) => x.letter === letter)) {
+      line(`
+  ${c.red}Диска ${letter}: на этой машине нет.${c.reset}`);
+      mf.close(); await pause(); return;
+    }
+    volumeMap[v.role] = `${letter}:`;
   }
 
   const relocations = await askRelocations(mf);
   if (relocations === null) { mf.close(); return; }
-  if (!(await needPassphrase(st, chosen, true))) { mf.close(); return; }
+  if (!(await needPassphrase(st, chosen, dir, true))) { mf.close(); return; }
 
   // Always show a dry run before touching the filesystem.
   title("Восстановление", "предпросмотр — ничего не записывается");
@@ -522,7 +564,7 @@ async function screenSync(st: State): Promise<void> {
 
   line(`\n  ${c.grey}профили в этом бэкапе: ${known.join(", ")}${c.reset}`);
   if (!(await checkRunningApps(known))) return;
-  if (!(await needPassphrase(st, known))) return;
+  if (!(await needPassphrase(st, known, dir))) return;
 
   let release: () => void;
   try {
@@ -539,6 +581,7 @@ async function screenSync(st: State): Promise<void> {
   const machine = await detectMachine();
   const mf = new Manifest(dir);
   mf.saveMachine(machine);
+  if (st.passphrase) registerPassphrase(mf, st.passphrase);
   try {
     const raw = await Bun.file(`${machine.home}\\.claude.json`).text();
     mf.setMeta("projectMap", JSON.stringify(buildProjectMap(JSON.parse(raw), (abs) => toPortable(abs, machine))));
@@ -681,7 +724,7 @@ function write(s: string): void {
 }
 
 export async function runTui(): Promise<void> {
-  const st: State = { backupDir: DEFAULT_BACKUP, passphrase: null, uploadConcurrency: 32 };
+  const st: State = { backupDir: DEFAULT_BACKUP, passphrase: null, passphraseDir: null, uploadConcurrency: 32 };
 
   for (;;) {
     const cfg = r2.loadConfig();
@@ -717,6 +760,7 @@ export async function runTui(): Promise<void> {
       case "quit":
       case null:
         line(`\n  ${c.grey}пока${c.reset}\n`);
+        closeInput();
         return;
     }
   }
